@@ -124,19 +124,19 @@ pub enum StreamItem {
     Output(Vec<u8>),
     /// A Rex message, `ESC _ rex1;<nonce>;<json> ESC \`, with a matching nonce.
     Rex(Value),
-    /// The Ghostty snapshot at the head of the stream has ended.
-    SnapshotEnd,
+    /// The Ghostty snapshot at the head of the stream, complete.
+    Snapshot(Vec<u8>),
 }
 
 enum State {
-    /// Inside the binary snapshot, scanning for the first Rex message.
-    Snapshot { carry: Vec<u8> },
+    /// Inside the binary snapshot, collecting it until the first Rex message.
+    Snapshot { snapshot: Vec<u8> },
     Normal,
     Esc,
     Apc { buf: Vec<u8>, esc: bool },
 }
 
-/// Splits a terminal stream into program output and Rex messages. It drops the leading
+/// Splits a terminal stream into program output and Rex messages. The stream starts with a
 /// Ghostty snapshot, which ends where the first Rex message (a `resize`) begins.
 pub struct StreamSplitter {
     prefix: Vec<u8>,
@@ -149,27 +149,22 @@ impl StreamSplitter {
     pub fn new(nonce: u64) -> Self {
         Self {
             prefix: format!("rex1;{nonce};").into_bytes(),
-            state: State::Snapshot { carry: Vec::new() },
+            state: State::Snapshot { snapshot: Vec::new() },
         }
     }
 
     pub fn feed(&mut self, bytes: &[u8], out: &mut Vec<StreamItem>) {
-        if let State::Snapshot { carry } = &mut self.state {
+        if let State::Snapshot { snapshot } = &mut self.state {
             let mut marker = vec![0x1b, b'_'];
             marker.extend_from_slice(&self.prefix);
-            carry.extend_from_slice(bytes);
-            match find(carry, &marker) {
-                Some(at) => {
-                    let rest = carry.split_off(at);
-                    out.push(StreamItem::SnapshotEnd);
-                    self.state = State::Normal;
-                    self.feed_live(&rest, out);
-                }
-                None => {
-                    // Keep only a tail that could hold the start of a split marker.
-                    let keep = carry.len().min(marker.len() - 1);
-                    carry.drain(..carry.len() - keep);
-                }
+            // Search only the new bytes, plus enough before them for a marker split in two.
+            let from = snapshot.len().saturating_sub(marker.len() - 1);
+            snapshot.extend_from_slice(bytes);
+            if let Some(at) = find(&snapshot[from..], &marker).map(|i| from + i) {
+                let rest = snapshot.split_off(at);
+                out.push(StreamItem::Snapshot(std::mem::take(snapshot)));
+                self.state = State::Normal;
+                self.feed_live(&rest, out);
             }
             return;
         }
@@ -262,7 +257,7 @@ mod tests {
             .map(|item| match item {
                 StreamItem::Output(b) => format!("out:{}", String::from_utf8_lossy(&b)),
                 StreamItem::Rex(v) => format!("rex:{}", v["type"].as_str().unwrap()),
-                StreamItem::SnapshotEnd => "snap".into(),
+                StreamItem::Snapshot(b) => format!("snap:{}", b.len()),
             })
             .collect()
     }
@@ -283,7 +278,7 @@ mod tests {
         assert_eq!(
             items,
             [
-                "snap",
+                "snap:16",
                 "rex:resize",
                 "out:hello\x1b[1m\x1b_other\x1b\\x",
                 "out:\x1b_rex1;7;{\"type\":\"theme\"}\x1b\\",

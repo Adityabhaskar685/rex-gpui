@@ -1,7 +1,8 @@
 //! Keeps a local copy of one terminal block, off the UI thread.
 //!
-//! A task on the tokio runtime reads the block's data stream, parses it into an
-//! `alacritty_terminal` grid that the pane locks to draw, and tells the pane when to redraw.
+//! A task on the tokio runtime reads the block's data stream into a libghostty-vt terminal
+//! that the pane locks to draw, and tells the pane when to redraw. The stream starts with
+//! a Ghostty snapshot of the server's terminal, which libghostty-vt restores exactly.
 //! Parsing a flood of output can take a whole core, so it can't run on the UI thread; and the
 //! stream is read only as fast as it's parsed, so a backlog waits in the server, not here.
 //! When the stream drops, the task reconnects and redraws from the server's copy.
@@ -10,18 +11,22 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::term::Term;
-use alacritty_terminal::term::test::TermSize;
-use alacritty_terminal::vte::ansi::Processor;
 use anyhow::Result;
 use serde_json::{Value, json};
 
+use crate::ghostty::Terminal;
 use crate::rex::control::Control;
 use crate::rex::data::{self, DataMessage, StreamItem, StreamSplitter};
-use crate::terminal::{Listener, term_config};
 
-pub type SharedTerm = Arc<Mutex<Term<Listener>>>;
+/// The local copy of a terminal, shared between the mirror task and the pane.
+pub struct Shared {
+    pub term: Terminal,
+    /// Goes up whenever `term` is replaced by a new one, which loses settings such as the
+    /// default colors, so the pane knows to apply them again.
+    pub generation: u64,
+}
+
+pub type SharedTerm = Arc<Mutex<Shared>>;
 
 /// What the pane needs to hear about. Output itself goes straight into the shared grid.
 pub enum MirrorEvent {
@@ -52,7 +57,8 @@ impl Drop for Mirror {
 const FORMAT_CHUNK: u64 = 900_000;
 
 pub fn start(control: Control, session_id: String, block_id: String) -> Mirror {
-    let term: SharedTerm = Arc::new(Mutex::new(Term::new(term_config(), &TermSize::new(80, 24), Listener)));
+    let term = Terminal::new(80, 24).expect("creating a terminal");
+    let term: SharedTerm = Arc::new(Mutex::new(Shared { term, generation: 0 }));
     let (tx, events) = async_channel::unbounded();
     let dirty = Arc::new(AtomicBool::new(false));
     let task = crate::runtime().spawn(run(control, session_id, block_id, term.clone(), tx, dirty.clone()));
@@ -118,9 +124,9 @@ async fn stream_once(pipe: &Pipe) -> Result<Ended, anyhow::Error> {
         return Ok(Ended::Done);
     }
     let (rx, _guard) = data::open_terminal_stream(&pipe.control, &pipe.session_id, &pipe.block_id).await?;
-    let mut processor: Processor = Processor::new();
     let mut splitter = None;
     let mut live = false;
+    let mut announced = false;
     let mut items = Vec::new();
 
     while let Ok(msg) = rx.recv().await {
@@ -135,20 +141,34 @@ async fn stream_once(pipe: &Pipe) -> Result<Ended, anyhow::Error> {
                 let Some(splitter) = splitter.as_mut() else { continue };
                 items.clear();
                 splitter.feed(&bytes, &mut items);
-                let mut snapshot_ended = false;
+                let mut redraw_from_vt = false;
                 {
-                    let mut term = pipe.term.lock().unwrap();
+                    let mut shared = pipe.term.lock().unwrap();
                     for item in items.drain(..) {
                         match item {
-                            StreamItem::SnapshotEnd => snapshot_ended = true,
-                            // Before the redraw, output is already part of the screen it reads.
-                            StreamItem::Output(bytes) if live => processor.advance(&mut *term, &bytes),
+                            StreamItem::Snapshot(snapshot) => match Terminal::from_snapshot(&snapshot) {
+                                Ok(term) => {
+                                    shared.term = term;
+                                    shared.generation += 1;
+                                    live = true;
+                                }
+                                Err(err) => {
+                                    // A snapshot format this library doesn't know, say after a
+                                    // Rex update: read the screen as VT text instead.
+                                    log::warn!("restoring {} from its snapshot: {err:#}", pipe.block_id);
+                                    redraw_from_vt = true;
+                                }
+                            },
+                            StreamItem::Output(bytes) if live => shared.term.write(&bytes),
+                            // Before a redraw, output is already part of the screen it reads.
                             StreamItem::Output(_) => {}
                             StreamItem::Rex(msg) => match msg["type"].as_str() {
                                 Some("resize") => {
-                                    let cols = msg["cols"].as_u64().unwrap_or(80).max(1) as usize;
-                                    let rows = msg["rows"].as_u64().unwrap_or(24).max(1) as usize;
-                                    term.resize(TermSize::new(cols, rows));
+                                    let cols = msg["cols"].as_u64().unwrap_or(80) as u16;
+                                    let rows = msg["rows"].as_u64().unwrap_or(24) as u16;
+                                    let width = msg["cell_width_px"].as_u64().unwrap_or(0) as u32;
+                                    let height = msg["cell_height_px"].as_u64().unwrap_or(0) as u32;
+                                    shared.term.resize(cols, rows, width, height);
                                 }
                                 Some("theme") => {
                                     pipe.send(MirrorEvent::Theme(msg));
@@ -161,21 +181,23 @@ async fn stream_once(pipe: &Pipe) -> Result<Ended, anyhow::Error> {
                         }
                     }
                 }
-                if snapshot_ended {
-                    // The stream starts with a Ghostty snapshot this client can't read, so
-                    // rebuild the screen from the server's VT rendering. Output that arrives
-                    // meanwhile waits in the stream and is applied after it.
+                if redraw_from_vt {
+                    // Output that arrives meanwhile waits in the stream and is applied after.
                     match fetch_vt(&pipe.control, &pipe.session_id, &pipe.block_id).await {
                         Ok(content) => {
-                            let mut term = pipe.term.lock().unwrap();
-                            let size = TermSize::new(term.columns(), term.screen_lines());
-                            *term = Term::new(term_config(), &size, Listener);
-                            processor = Processor::new();
-                            processor.advance(&mut *term, content.as_bytes());
+                            let mut shared = pipe.term.lock().unwrap();
+                            let mut term = Terminal::new(shared.term.cols(), shared.term.rows())?;
+                            term.write(content.as_bytes());
+                            shared.term = term;
+                            shared.generation += 1;
                         }
                         Err(err) => log::warn!("reading the screen of {}: {err:#}", pipe.block_id),
                     }
                     live = true;
+                }
+                // Live from the snapshot or redraw on; tell the pane once.
+                if live && !announced {
+                    announced = true;
                     if !pipe.send(MirrorEvent::Status(None)) {
                         return Ok(Ended::Done);
                     }

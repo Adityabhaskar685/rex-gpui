@@ -6,6 +6,7 @@
 
 mod assets;
 mod check;
+mod ghostty;
 mod keys;
 mod mirror;
 mod rex;

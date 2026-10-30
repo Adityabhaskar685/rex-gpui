@@ -7,7 +7,18 @@ server documents at `/llms.txt`.
 
 ## Install
 
-Needs Rust and the usual GPUI libraries (Wayland or X11, Vulkan, xkbcommon, fontconfig).
+Needs Rust, the usual GPUI libraries (Wayland or X11, Vulkan, xkbcommon, fontconfig),
+libclang (for bindgen), and **libghostty-vt**, Ghostty's terminal library. Build that from
+Ghostty's source with Zig:
+
+```sh
+git clone https://github.com/ghostty-org/ghostty && cd ghostty
+zig build -Demit-lib-vt -Doptimize=ReleaseFast --prefix ~/.local
+```
+
+`build.rs` finds it with pkg-config, looking in `~/.local/share/pkgconfig` as well (set
+`PKG_CONFIG_PATH` for another prefix), and links it statically, so the installed app
+doesn't need it at run time.
 
 ```sh
 ./install.sh             # build, then install as a desktop app for your user
@@ -207,10 +218,13 @@ own server instead.
 
 - **Control**: one WebSocket at `/api/control` (`rex.control.v1`), JSON requests and events.
 - **Data**: one WebSocket per terminal at `/api/data` (`rex.data.terminal.v1`). The stream
-  starts with a binary Ghostty snapshot, which the client skips; it rebuilds the screen from
-  `com.superlogical.terminal.format` in VT form instead, then applies live output.
-- **Screen model**: `alacritty_terminal`, which only mirrors output for drawing. The
-  terminal itself is Ghostty, inside the server, which also answers programs' queries.
+  starts with a Ghostty snapshot of the server's terminal, then carries live output.
+- **Screen model**: libghostty-vt, the same terminal core the server runs. The client
+  restores each terminal from its snapshot, then feeds it the live output, on a background
+  task; the pane draws from libghostty-vt's render state. If a snapshot can't be decoded,
+  say because a Rex update changed its format, the client rebuilds the screen from
+  `com.superlogical.terminal.format` instead. The server's terminal answers programs'
+  queries, so the local copy never replies.
 - **Remote**: the same WebSockets over HTTP or HTTPS (system OpenSSL and certificates). A
   bare host name tries HTTPS on 443, then HTTPS and HTTP on 7297, as the CLI does.
 

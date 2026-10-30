@@ -1,19 +1,12 @@
-//! One Rex terminal block: its data stream, a local `alacritty_terminal` model of the
-//! screen, and the GPUI view that paints it and sends keys back.
+//! One Rex terminal block: a local libghostty-vt copy of the server's terminal, kept by the
+//! mirror task, and the GPUI view that paints it and sends keys back.
 //!
-//! The server is the real terminal. The local model only mirrors its output for drawing, so
+//! The server is the real terminal. The local copy only mirrors its output for drawing, so
 //! replies a program asks for, such as cursor reports, are left to the server.
 
 use std::ops::Range;
 
-use alacritty_terminal::event::{Event as TermEvent, EventListener};
-use alacritty_terminal::grid::{Dimensions, Scroll};
-use alacritty_terminal::index::{Column, Line, Point as GridPoint, Side};
-use alacritty_terminal::selection::{Selection, SelectionType};
-use alacritty_terminal::term::cell::Flags;
-use alacritty_terminal::term::color::Colors;
-use alacritty_terminal::term::{Config, Term, TermMode};
-use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Rgb};
+use crate::ghostty::{self, CursorShape, RenderState, Rgb, Scroll, ViewportPoint, Width};
 use gpui::{
     App, Bounds, ClipboardItem, Context, FocusHandle, Focusable, Font, FontWeight, Hsla,
     KeyDownEvent, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
@@ -27,12 +20,6 @@ use crate::mirror::{self, Mirror, MirrorEvent, SharedTerm};
 use crate::rex::control::Control;
 /// Width kept free at the right of the grid for the scrollbar.
 const SCROLLBAR_WIDTH: f32 = 10.;
-
-pub struct Listener;
-
-impl EventListener for Listener {
-    fn send_event(&self, _event: TermEvent) {}
-}
 
 pub struct TerminalPane {
     control: Control,
@@ -49,8 +36,13 @@ pub struct TerminalPane {
     cell: Option<CellMetrics>,
     /// Where the grid was last painted, to turn mouse positions into cells.
     origin: Option<Point<Pixels>>,
-    /// A left-button drag is selecting text locally rather than going to the program.
-    selecting: bool,
+    /// Where a left-button drag that selects text started, while it lasts.
+    select_anchor: Option<ViewportPoint>,
+    /// What the terminal showed at the last frame, read without holding its lock.
+    render_state: RenderState,
+    /// The colors last given to the terminal, and the terminal they were given to, so they
+    /// are set again when either changes.
+    applied_theme: Option<(u64, String)>,
     /// The grid's height when last painted, which is also the scrollbar's track.
     track_height: Option<Pixels>,
     /// The scrollbar thumb is being dragged, held this far below its top.
@@ -165,7 +157,9 @@ impl TerminalPane {
             scroll_remainder: 0.,
             cell: None,
             origin: None,
-            selecting: false,
+            select_anchor: None,
+            render_state: RenderState::new().expect("creating a render state"),
+            applied_theme: None,
             track_height: None,
             scroll_drag: None,
             pending_paste: None,
@@ -180,7 +174,7 @@ impl TerminalPane {
 
     /// Lock the local copy of the terminal. Lock once per statement: the guard lives to the
     /// end of the statement, and a second lock in it would wait forever.
-    fn term(&self) -> std::sync::MutexGuard<'_, Term<Listener>> {
+    fn term(&self) -> std::sync::MutexGuard<'_, mirror::Shared> {
         self.term.lock().unwrap()
     }
 
@@ -220,10 +214,10 @@ impl TerminalPane {
     /// Paste `text`. A program that turned on bracketed paste gets it as one block. Without
     /// it, a shell runs each line as it arrives, so a multi-line paste waits for a yes first.
     fn paste(&mut self, text: String, cx: &mut Context<Self>) {
-        self.term().selection = None;
-        self.selecting = false;
+        self.term().term.clear_selection();
+        self.select_anchor = None;
         let lines = text.trim_end_matches(['\n', '\r']).lines().count();
-        if lines > 1 && !self.term().mode().contains(TermMode::BRACKETED_PASTE) {
+        if lines > 1 && !self.term().term.dec_mode(BRACKETED_PASTE) {
             self.pending_paste = Some(text);
             cx.notify();
             return;
@@ -267,7 +261,7 @@ impl TerminalPane {
             return;
         }
         if m.control && m.shift && !m.alt && ks.key == "c" {
-            let text = self.term().selection_to_string().unwrap_or_default();
+            let text = self.term().term.selection_text().unwrap_or_default();
             if !text.is_empty() {
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
             }
@@ -275,22 +269,23 @@ impl TerminalPane {
             return;
         }
         if m.shift && !m.control && matches!(ks.key.as_str(), "pageup" | "pagedown") {
-            let rows = self.term().screen_lines() as i32;
-            let delta = if ks.key == "pageup" { rows } else { -rows };
-            self.term().scroll_display(Scroll::Delta(delta));
+            let rows = self.term().term.rows() as isize;
+            let delta = if ks.key == "pageup" { -rows } else { rows };
+            self.term().term.scroll(Scroll::Delta(delta));
             cx.notify();
             cx.stop_propagation();
             return;
         }
         let Some(key) = keys::client_key(ks, event.is_held) else { return };
         cx.stop_propagation();
-        if self.term().selection.take().is_some() {
-            cx.notify();
-        }
-        // Typing returns the view to the bottom, as other terminals do.
-        if self.term().grid().display_offset() != 0 {
-            self.term().scroll_display(Scroll::Bottom);
-            cx.notify();
+        {
+            let mut shared = self.term();
+            // Typing clears a selection and returns the view to the bottom, as in Ghostty.
+            if shared.term.has_selection() || !shared.term.at_bottom() {
+                shared.term.clear_selection();
+                shared.term.scroll(Scroll::Bottom);
+                cx.notify();
+            }
         }
         self.control.send(
             "client.key",
@@ -311,10 +306,13 @@ impl TerminalPane {
 
     fn on_scroll(&mut self, event: &ScrollWheelEvent, _window: &mut Window, cx: &mut Context<Self>) {
         let Some(cell) = self.cell else { return };
-        let mode = *self.term().mode();
+        let to_program = {
+            let shared = self.term();
+            shared.term.alternate_screen() || shared.term.mouse_tracking()
+        };
         // Full-screen programs and programs that read the mouse get real wheel events. The
         // server's terminal turns them into arrow keys for programs that want that.
-        if mode.intersects(TermMode::ALT_SCREEN | TermMode::MOUSE_MODE) && !event.modifiers.shift {
+        if to_program && !event.modifiers.shift {
             let (dx, dy, unit) = match event.delta {
                 ScrollDelta::Lines(d) => (-d.x, -d.y, "line"),
                 ScrollDelta::Pixels(d) => (-f32::from(d.x), -f32::from(d.y), "pixel"),
@@ -342,7 +340,8 @@ impl TerminalPane {
         let whole = lines.trunc();
         self.scroll_remainder = lines - whole;
         if whole != 0. {
-            self.term().scroll_display(Scroll::Delta(whole as i32));
+            // Wheel up is positive here; scrolling back is negative there.
+            self.term().term.scroll(Scroll::Delta(-whole as isize));
             cx.notify();
         }
     }
@@ -352,22 +351,19 @@ impl TerminalPane {
         let (origin, cell) = (self.origin?, self.cell?);
         let col = ((position.x - origin.x) / cell.width).floor().max(0.0) as usize;
         let row = ((position.y - origin.y) / cell.height).floor().max(0.0) as usize;
-        let term = self.term();
-        Some((col.min(term.columns().saturating_sub(1)), row.min(term.screen_lines().saturating_sub(1))))
+        let shared = self.term();
+        let (cols, rows) = (shared.term.cols() as usize, shared.term.rows() as usize);
+        Some((col.min(cols.saturating_sub(1)), row.min(rows.saturating_sub(1))))
     }
 
-    fn grid_point(&self, position: Point<Pixels>) -> Option<(GridPoint, Side)> {
-        let (col, row) = self.cell_at(position)?;
-        let cell = self.cell?;
-        let within = (position.x - self.origin?.x) / cell.width - col as f32;
-        let side = if within < 0.5 { Side::Left } else { Side::Right };
-        let line = Line(row as i32 - self.term().grid().display_offset() as i32);
-        Some((GridPoint::new(line, Column(col)), side))
+    fn viewport_point(&self, position: Point<Pixels>) -> Option<ViewportPoint> {
+        let (x, y) = self.cell_at(position)?;
+        Some(ViewportPoint { x: x as u16, y: y as u16 })
     }
 
     /// Whether mouse events belong to the program. Shift keeps them local, for selecting.
     fn program_wants_mouse(&self, modifiers: &Modifiers) -> bool {
-        self.term().mode().intersects(TermMode::MOUSE_MODE) && !modifiers.shift
+        self.term().term.mouse_tracking() && !modifiers.shift
     }
 
     fn send_mouse(&self, action: &str, button: Option<MouseButton>, held: Option<MouseButton>, position: Point<Pixels>, modifiers: &Modifiers) {
@@ -403,28 +399,35 @@ impl TerminalPane {
         if event.button != MouseButton::Left {
             return;
         }
-        let Some((point, side)) = self.grid_point(event.position) else { return };
-        let kind = match event.click_count {
-            2 => SelectionType::Semantic,
-            n if n >= 3 => SelectionType::Lines,
-            _ => SelectionType::Simple,
-        };
-        self.term().selection = Some(Selection::new(kind, point, side));
-        self.selecting = true;
+        let Some(point) = self.viewport_point(event.position) else { return };
+        match event.click_count {
+            1 => {
+                // A plain click clears the selection; dragging from here selects.
+                self.term().term.clear_selection();
+                self.select_anchor = Some(point);
+            }
+            2 => {
+                self.term().term.select_word(point);
+                self.finish_selection(cx);
+            }
+            _ => {
+                self.term().term.select_line(point);
+                self.finish_selection(cx);
+            }
+        }
         cx.notify();
     }
 
     /// Scroll so the thumb's top follows `y`, measured from the top of the track.
     fn scroll_to_thumb(&mut self, top: f32, cx: &mut Context<Self>) {
         let Some(track) = self.track_height else { return };
-        let history = self.term().grid().history_size() as f32;
-        let total = history + self.term().screen_lines() as f32;
-        // The thumb's top marks the first visible line, counting from the oldest one.
-        let first_line = (top / f32::from(track) * total).clamp(0.0, history);
-        let offset = (history - first_line).round() as i32;
-        let current = self.term().grid().display_offset() as i32;
-        if offset != current {
-            self.term().scroll_display(Scroll::Delta(offset - current));
+        let mut shared = self.term();
+        let bar = shared.term.scrollbar();
+        // The thumb's top marks the first visible row.
+        let max = bar.total.saturating_sub(bar.len) as f32;
+        let row = (top / f32::from(track) * bar.total as f32).clamp(0.0, max).round() as u64;
+        if row != bar.offset {
+            shared.term.scroll(Scroll::Row(row as usize));
             cx.notify();
         }
     }
@@ -432,32 +435,29 @@ impl TerminalPane {
     fn on_scrollbar_down(&mut self, event: &MouseDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         cx.stop_propagation();
         let (Some(origin), Some(track)) = (self.origin, self.track_height) else { return };
-        let history = self.term().grid().history_size() as f32;
-        let total = history + self.term().screen_lines() as f32;
-        let thumb_height = f32::from(track) * self.term().screen_lines() as f32 / total;
+        let (thumb_top, thumb_height) = self.thumb(track);
         let y = f32::from(event.position.y - origin.y);
-        let thumb_top = self.thumb_top(track);
         // Grabbing the thumb keeps its offset under the pointer; clicking the track centers it.
         let grab = if (thumb_top..thumb_top + thumb_height).contains(&y) { y - thumb_top } else { thumb_height / 2. };
         self.scroll_drag = Some(px(grab));
         self.scroll_to_thumb(y - grab, cx);
     }
 
-    fn thumb_top(&self, track: Pixels) -> f32 {
-        let history = self.term().grid().history_size() as f32;
-        let total = history + self.term().screen_lines() as f32;
-        let first_line = history - self.term().grid().display_offset() as f32;
-        f32::from(track) * first_line / total
+    /// The scrollbar thumb's top and height on a track this tall.
+    fn thumb(&self, track: Pixels) -> (f32, f32) {
+        let bar = self.term().term.scrollbar();
+        let total = bar.total.max(1) as f32;
+        let track = f32::from(track);
+        (track * bar.offset as f32 / total, track * bar.len as f32 / total)
     }
 
     /// End a drag-selection, keeping what it selected as the primary selection.
     fn finish_selection(&mut self, cx: &mut Context<Self>) {
-        self.selecting = false;
+        self.select_anchor = None;
         // Like other X11 and Wayland terminals, a selection becomes the primary selection.
-        if let Some(text) = self.term().selection_to_string().filter(|t| !t.is_empty()) {
+        let text = self.term().term.selection_text().filter(|t| !t.is_empty());
+        if let Some(text) = text {
             cx.write_to_primary(ClipboardItem::new_string(text));
-        } else {
-            self.term().selection = None;
         }
         cx.notify();
     }
@@ -471,23 +471,22 @@ impl TerminalPane {
             }
             return;
         }
-        // The button came up somewhere this pane didn't hear about, such as over a menu.
-        if self.selecting && event.pressed_button != Some(MouseButton::Left) {
-            self.finish_selection(cx);
-            return;
-        }
-        if self.selecting {
-            if let Some((point, side)) = self.grid_point(event.position) {
-                if let Some(selection) = self.term().selection.as_mut() {
-                    selection.update(point, side);
+        if let Some(anchor) = self.select_anchor {
+            // The button came up somewhere this pane didn't hear about, such as over a menu.
+            if event.pressed_button != Some(MouseButton::Left) {
+                self.finish_selection(cx);
+                return;
+            }
+            if let Some(point) = self.viewport_point(event.position) {
+                if point != anchor || self.term().term.has_selection() {
+                    self.term().term.select(anchor, point);
+                    cx.notify();
                 }
-                cx.notify();
             }
             return;
         }
         // Report drags; plain motion only matters to programs in any-motion mode.
-        let wants_motion = event.pressed_button.is_some()
-            || self.term().mode().contains(TermMode::MOUSE_MOTION);
+        let wants_motion = event.pressed_button.is_some() || self.term().term.dec_mode(ANY_MOTION_MOUSE);
         if wants_motion && self.program_wants_mouse(&event.modifiers) {
             self.send_mouse("motion", None, event.pressed_button, event.position, &event.modifiers);
         }
@@ -497,7 +496,7 @@ impl TerminalPane {
         if self.scroll_drag.take().is_some() {
             return;
         }
-        if self.selecting {
+        if self.select_anchor.is_some() {
             self.finish_selection(cx);
             return;
         }
@@ -537,9 +536,9 @@ impl TerminalPane {
     }
 }
 
-pub fn term_config() -> Config {
-    Config { scrolling_history: 10_000, ..Config::default() }
-}
+/// DEC private modes the pane checks.
+const BRACKETED_PASTE: u16 = 2004;
+const ANY_MOTION_MOUSE: u16 = 1003;
 
 /// The pane's title, program, or directory changed, which the tabs and sidebar show.
 pub struct InfoChanged;
@@ -580,7 +579,20 @@ impl Render for TerminalPane {
         self.cell = Some(cell);
 
         let focused = self.focus_handle.is_focused(window);
-        let frame = Frame::capture(&self.term(), &self.theme(), focused);
+        let theme = self.theme();
+        {
+            let term = self.term.clone();
+            let mut shared = term.lock().unwrap();
+            // A new terminal, or new colors, needs the default colors set again.
+            let key = (shared.generation, theme.key.clone());
+            if self.applied_theme.as_ref() != Some(&key) {
+                shared.term.set_default_colors(theme.foreground, theme.background, theme.cursor, &theme.palette);
+                self.applied_theme = Some(key);
+            }
+            // Copy what's on screen, then draw from the copy without the lock.
+            self.render_state.update(&shared.term);
+        }
+        let frame = Frame::capture(&self.render_state.frame(), &theme, focused);
         let background = frame.background;
         let status = self.status();
         let entity = cx.entity();
@@ -603,7 +615,7 @@ impl Render for TerminalPane {
             // A drag that ends outside the pane still has to end.
             .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| {
                 this.scroll_drag = None;
-                if this.selecting {
+                if this.select_anchor.is_some() {
                     this.finish_selection(cx);
                 }
             }))
@@ -641,14 +653,18 @@ impl TerminalPane {
     /// A thin scrollbar over the right edge, when there's scrollback to scroll through.
     fn render_scrollbar(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
         let track = self.track_height?;
-        let history = self.term().grid().history_size();
-        if history == 0 || self.term().mode().contains(TermMode::ALT_SCREEN) {
+        let (has_history, alternate, at_bottom) = {
+            let shared = self.term();
+            let bar = shared.term.scrollbar();
+            (bar.total > bar.len, shared.term.alternate_screen(), shared.term.at_bottom())
+        };
+        if !has_history || alternate {
             return None;
         }
-        let total = (history + self.term().screen_lines()) as f32;
-        let height = (f32::from(track) * self.term().screen_lines() as f32 / total).max(24.);
-        let top = self.thumb_top(track).min(f32::from(track) - height);
-        let active = self.scroll_drag.is_some() || self.term().grid().display_offset() != 0;
+        let (top, height) = self.thumb(track);
+        let height = height.max(24.);
+        let top = top.min(f32::from(track) - height);
+        let active = self.scroll_drag.is_some() || !at_bottom;
         let group = SharedString::from(format!("scrollbar-{}", self.block_id));
         Some(
             div()
@@ -746,6 +762,8 @@ struct CellStyle {
 }
 
 struct Segment {
+    /// Every cell in the segment is one character, so they can be drawn as one run.
+    single: bool,
     row: usize,
     col: usize,
     /// How many columns each character advances. 2 for a wide character.
@@ -762,83 +780,76 @@ struct Frame {
 }
 
 impl Frame {
-    fn capture(term: &Term<Listener>, theme: &Theme, focused: bool) -> Self {
-        let content = term.renderable_content();
-        let colors = content.colors;
-        let default_bg = theme.resolve(Color::Named(NamedColor::Background), colors);
-        let offset = content.display_offset as i32;
-        let selection = content.selection;
+    fn capture(frame: &ghostty::Frame, theme: &Theme, focused: bool) -> Self {
+        let default_fg = to_hsla(frame.foreground);
+        let default_bg = to_hsla(frame.background);
         let selection_bg = to_hsla(theme.selection);
         let selection_fg = theme.selection_fg.map(to_hsla);
         let mut segments: Vec<Segment> = Vec::new();
         let mut backgrounds: Vec<(usize, Range<usize>, Hsla)> = Vec::new();
 
-        for indexed in content.display_iter {
-            let cell = indexed.cell;
-            let row = (indexed.point.line.0 + offset) as usize;
-            let col = indexed.point.column.0;
-            if cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
-                continue;
-            }
-            let mut fg = theme.resolve(cell.fg, colors);
-            let mut bg = theme.resolve(cell.bg, colors);
-            if cell.flags.contains(Flags::INVERSE) {
-                std::mem::swap(&mut fg, &mut bg);
-            }
-            if cell.flags.contains(Flags::DIM) {
-                fg = fg.opacity(0.66);
-            }
-            if selection.is_some_and(|s| s.contains(indexed.point)) {
-                bg = selection_bg;
-                if let Some(selection_fg) = selection_fg {
-                    fg = selection_fg;
+        for (row, cells) in frame.rows.iter().enumerate() {
+            for (col, cell) in cells.iter().enumerate() {
+                if cell.width == Width::Spacer {
+                    continue;
                 }
-            }
-            let wide = cell.flags.contains(Flags::WIDE_CHAR);
-            let width = if wide { 2 } else { 1 };
-            let bg = (bg != default_bg).then_some(bg);
-            if let Some(bg) = bg {
-                match backgrounds.last_mut() {
-                    Some((r, cols, color)) if *r == row && cols.end == col && *color == bg => {
-                        cols.end = col + width
+                let mut fg = cell.fg.map_or(default_fg, to_hsla);
+                let mut bg = cell.bg.map(to_hsla);
+                if cell.inverse {
+                    let old_fg = fg;
+                    fg = bg.unwrap_or(default_bg);
+                    bg = Some(old_fg);
+                }
+                if cell.faint {
+                    fg = fg.opacity(0.66);
+                }
+                if cell.selected {
+                    bg = Some(selection_bg);
+                    if let Some(selection_fg) = selection_fg {
+                        fg = selection_fg;
                     }
-                    _ => backgrounds.push((row, col..col + width, bg)),
                 }
-            }
-            if cell.c == ' ' || cell.c == '\0' || cell.flags.contains(Flags::HIDDEN) {
-                continue;
-            }
-            let style = CellStyle {
-                fg,
-                bg: None,
-                bold: cell.flags.contains(Flags::BOLD),
-                italic: cell.flags.contains(Flags::ITALIC),
-                underline: cell.flags.intersects(Flags::ALL_UNDERLINES),
-                strike: cell.flags.contains(Flags::STRIKEOUT),
-            };
-            let mut text = String::new();
-            text.push(cell.c);
-            if let Some(zerowidth) = cell.zerowidth() {
-                text.extend(zerowidth);
-            }
-            match segments.last_mut() {
-                Some(seg)
-                    if seg.row == row
-                        && seg.width == width
-                        && seg.style == style
-                        && seg.col + seg.text.chars().count() * width == col
-                        && cell.zerowidth().is_none() =>
-                {
-                    seg.text.push(cell.c)
+                let width = if cell.width == Width::Wide { 2 } else { 1 };
+                if let Some(bg) = bg.filter(|bg| *bg != default_bg) {
+                    match backgrounds.last_mut() {
+                        Some((r, cols, color)) if *r == row && cols.end == col && *color == bg => {
+                            cols.end = col + width
+                        }
+                        _ => backgrounds.push((row, col..col + width, bg)),
+                    }
                 }
-                _ => segments.push(Segment { row, col, width, text, style }),
+                if cell.text.is_empty() || cell.text == " " || cell.invisible {
+                    continue;
+                }
+                let style = CellStyle {
+                    fg,
+                    bg: None,
+                    bold: cell.bold,
+                    italic: cell.italic,
+                    underline: cell.underline,
+                    strike: cell.strikethrough,
+                };
+                // A cell with combining marks or an emoji sequence draws on its own.
+                let single = cell.text.chars().count() == 1;
+                match segments.last_mut() {
+                    Some(seg)
+                        if single
+                            && seg.single
+                            && seg.row == row
+                            && seg.width == width
+                            && seg.style == style
+                            && seg.col + seg.text.chars().count() * width == col =>
+                    {
+                        seg.text.push_str(&cell.text)
+                    }
+                    _ => segments.push(Segment { row, col, width, text: cell.text.clone(), style, single }),
+                }
             }
         }
 
-        let cursor = (content.cursor.shape != CursorShape::Hidden && offset == 0).then(|| {
-            let color = theme.cursor(colors);
-            let p: GridPoint = content.cursor.point;
-            (p.line.0.max(0) as usize, p.column.0, content.cursor.shape, color, focused)
+        let cursor = frame.cursor.as_ref().map(|c| {
+            let color = to_hsla(frame.cursor_color.or(theme.cursor).unwrap_or(frame.foreground));
+            (c.y as usize, c.x as usize, c.shape, color, focused)
         });
 
         Self { background: default_bg, segments, backgrounds, cursor }
@@ -866,13 +877,14 @@ impl Frame {
         if let Some((row, col, shape, color, focused)) = self.cursor {
             let origin = at(row, col);
             let quad = match (shape, focused) {
-                (CursorShape::Beam, _) => fill(Bounds::new(origin, size(px(2.), cell.height)), color),
+                (CursorShape::Bar, _) => fill(Bounds::new(origin, size(px(2.), cell.height)), color),
                 (CursorShape::Underline, _) => fill(
                     Bounds::new(point(origin.x, origin.y + cell.height - px(2.)), size(cell.width, px(2.))),
                     color,
                 ),
-                (_, true) => fill(Bounds::new(origin, size(cell.width, cell.height)), color.opacity(0.7)),
-                (_, false) => outline(Bounds::new(origin, size(cell.width, cell.height)), color, gpui::BorderStyle::Solid),
+                (CursorShape::Block, true) => fill(Bounds::new(origin, size(cell.width, cell.height)), color.opacity(0.7)),
+                // An unfocused pane, or a program asking for it, gets a hollow block.
+                _ => outline(Bounds::new(origin, size(cell.width, cell.height)), color, gpui::BorderStyle::Solid),
             };
             window.paint_quad(quad);
         }
@@ -912,7 +924,7 @@ impl Frame {
     }
 }
 
-/// Default colors, from the server's `theme` messages or built in.
+/// Default colors: the app theme's, with any the server set for this terminal on top.
 #[derive(Clone)]
 struct Theme {
     foreground: Rgb,
@@ -921,6 +933,8 @@ struct Theme {
     selection: Rgb,
     selection_fg: Option<Rgb>,
     palette: [Rgb; 256],
+    /// Tells two sets of colors apart, to know when the terminal needs new ones.
+    key: String,
 }
 
 impl Default for Theme {
@@ -935,6 +949,7 @@ impl Default for Theme {
             selection: rgb(colors.selection),
             selection_fg: colors.selection_fg.map(rgb),
             palette: default_palette(&colors.ansi),
+            key: theme.name.to_string(),
         }
     }
 }
@@ -960,44 +975,13 @@ impl Theme {
                 }
             }
         }
+        theme.key = format!("{}/{msg}", theme.key);
         theme
-    }
-
-    fn resolve(&self, color: Color, colors: &Colors) -> Hsla {
-        let rgb = match color {
-            Color::Spec(rgb) => rgb,
-            Color::Indexed(i) => colors[i as usize].unwrap_or(self.palette[i as usize]),
-            Color::Named(name) => colors[name].unwrap_or_else(|| self.named(name)),
-        };
-        to_hsla(rgb)
-    }
-
-    fn named(&self, name: NamedColor) -> Rgb {
-        match name {
-            NamedColor::Foreground | NamedColor::BrightForeground => self.foreground,
-            NamedColor::DimForeground => self.foreground,
-            NamedColor::Background => self.background,
-            NamedColor::Cursor => self.cursor.unwrap_or(self.foreground),
-            other => {
-                let index = other as usize;
-                if index < 16 {
-                    self.palette[index]
-                } else {
-                    // The dim colors follow the 8 normal ones in alacritty's numbering.
-                    let base = self.palette[(index - NamedColor::DimBlack as usize) % 8];
-                    Rgb { r: base.r * 2 / 3, g: base.g * 2 / 3, b: base.b * 2 / 3 }
-                }
-            }
-        }
-    }
-
-    fn cursor(&self, colors: &Colors) -> Hsla {
-        to_hsla(colors[NamedColor::Cursor].unwrap_or(self.cursor.unwrap_or(self.foreground)))
     }
 }
 
 fn rgb(hex: u32) -> Rgb {
-    Rgb { r: (hex >> 16) as u8, g: (hex >> 8) as u8, b: hex as u8 }
+    ((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
 }
 
 fn parse_hex(s: &str) -> Option<Rgb> {
@@ -1005,23 +989,23 @@ fn parse_hex(s: &str) -> Option<Rgb> {
     (s.len() == 6).then(|| u32::from_str_radix(s, 16).ok().map(rgb)).flatten()
 }
 
-fn to_hsla(c: Rgb) -> Hsla {
-    gpui::Rgba { r: c.r as f32 / 255., g: c.g as f32 / 255., b: c.b as f32 / 255., a: 1. }.into()
+fn to_hsla((r, g, b): Rgb) -> Hsla {
+    gpui::Rgba { r: r as f32 / 255., g: g as f32 / 255., b: b as f32 / 255., a: 1. }.into()
 }
 
 /// The 256-color palette: the theme's 16 colors, then the standard cube and gray ramp.
 fn default_palette(ansi: &[u32; 16]) -> [Rgb; 256] {
-    let mut palette = [Rgb::default(); 256];
+    let mut palette = [(0, 0, 0); 256];
     for (i, &hex) in ansi.iter().enumerate() {
         palette[i] = rgb(hex);
     }
     let level = |v: usize| if v == 0 { 0 } else { (55 + v * 40) as u8 };
     for i in 0..216 {
-        palette[16 + i] = Rgb { r: level(i / 36), g: level(i / 6 % 6), b: level(i % 6) };
+        palette[16 + i] = (level(i / 36), level(i / 6 % 6), level(i % 6));
     }
     for i in 0..24 {
         let v = (8 + i * 10) as u8;
-        palette[232 + i] = Rgb { r: v, g: v, b: v };
+        palette[232 + i] = (v, v, v);
     }
     palette
 }
@@ -1030,8 +1014,6 @@ fn default_palette(ansi: &[u32; 16]) -> [Rgb; 256] {
 mod tests {
     use super::*;
     use crate::rex::data::StreamSplitter;
-    use alacritty_terminal::term::test::TermSize;
-    use alacritty_terminal::vte::ansi::Processor;
 
     /// `cargo test --release -- --ignored --nocapture parse_throughput`
     #[test]
@@ -1051,11 +1033,10 @@ mod tests {
         }
         let split = start.elapsed();
 
-        let mut term = Term::new(term_config(), &TermSize::new(120, 40), Listener);
-        let mut processor: Processor = Processor::new();
+        let mut term = ghostty::Terminal::new(120, 40).unwrap();
         let start = std::time::Instant::now();
         for _ in 0..chunks {
-            processor.advance(&mut term, &chunk);
+            term.write(&chunk);
         }
         let parse = start.elapsed();
         let mb = (chunk.len() * chunks) as f64 / 1e6;
