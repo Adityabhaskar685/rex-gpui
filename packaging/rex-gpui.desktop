@@ -9,7 +9,9 @@ Terminal=false
 Categories=System;TerminalEmulator;
 Keywords=terminal;multiplexer;rex;shell;ssh;
 StartupWMClass=rex-gpui
-StartupNotify=true
+# GPUI never answers the launch's startup notification, so with this on GNOME shows a
+# busy cursor until it times out, though the window is already open.
+StartupNotify=false
 Actions=local;
 
 [Desktop Action local]
