@@ -19,7 +19,9 @@ mod workspace;
 
 use std::sync::OnceLock;
 
-use gpui::{App, Application, Bounds, Focusable, WindowBounds, WindowOptions, prelude::*, px, size};
+use gpui::{
+    App, Application, Bounds, Focusable, WindowBounds, WindowOptions, prelude::*, px, size,
+};
 
 use crate::rex::control::Control;
 use crate::rex::endpoint::{self, Endpoint};
@@ -39,7 +41,10 @@ pub fn count_render(kind: &'static str) {
     let (since, counts) = guard.get_or_insert_with(|| (Instant::now(), HashMap::new()));
     *counts.entry(kind).or_default() += 1;
     if since.elapsed().as_secs() >= 5 {
-        log::debug!("renders in {:.1}s: {counts:?}", since.elapsed().as_secs_f32());
+        log::debug!(
+            "renders in {:.1}s: {counts:?}",
+            since.elapsed().as_secs_f32()
+        );
         *since = Instant::now();
         counts.clear();
     }
@@ -78,7 +83,9 @@ fn main() {
                 return;
             }
             "-h" | "--help" => {
-                println!("usage: rex-gpui [-S SERVER] [SESSION]\n       rex-gpui [-S SERVER] --check SESSION [COMMAND]\n       rex-gpui --list-themes");
+                println!(
+                    "usage: rex-gpui [-S SERVER] [SESSION]\n       rex-gpui [-S SERVER] --check SESSION [COMMAND]\n       rex-gpui --list-themes"
+                );
                 return;
             }
             _ => positional.push(arg),
@@ -107,7 +114,10 @@ fn main() {
     let mut host_label = server.clone();
     let connected = match runtime().block_on(Control::connect(&endpoints, autostart)) {
         Err(err) if remembered.is_some() => {
-            log::warn!("{} is unreachable, so using the local server: {err:#}", server.as_deref().unwrap_or_default());
+            log::warn!(
+                "{} is unreachable, so using the local server: {err:#}",
+                server.as_deref().unwrap_or_default()
+            );
             host_label = None;
             runtime().block_on(Control::connect(&[Endpoint::local()], true))
         }
@@ -123,7 +133,10 @@ fn main() {
     log::info!("connected to {} as {}", control.endpoint, control.client_id);
 
     if target.as_deref() == Some("--check") {
-        let session = positional.get(1).cloned().expect("usage: rex-gpui --check SESSION [COMMAND]");
+        let session = positional
+            .get(1)
+            .cloned()
+            .expect("usage: rex-gpui --check SESSION [COMMAND]");
         let command = positional.get(2).cloned();
         let _events = events;
         if let Err(err) = runtime().block_on(check::run(control, &session, command)) {
@@ -133,41 +146,44 @@ fn main() {
         return;
     }
 
-    Application::new().with_assets(assets::Assets).run(move |cx: &mut App| {
-        workspace::bind_keys(cx);
-        let bounds = Bounds::centered(None, size(px(1100.), px(700.)), cx);
-        let window = cx
-            .open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    app_id: Some("rex-gpui".into()),
-                    titlebar: Some(gpui::TitlebarOptions {
-                        title: Some("Rex".into()),
-                        appears_transparent: true,
+    Application::new()
+        .with_assets(assets::Assets)
+        .run(move |cx: &mut App| {
+            workspace::bind_keys(cx);
+            let bounds = Bounds::centered(None, size(px(1100.), px(700.)), cx);
+            let window = cx
+                .open_window(
+                    WindowOptions {
+                        window_bounds: Some(WindowBounds::Windowed(bounds)),
+                        app_id: Some("rex-gpui".into()),
+                        titlebar: Some(gpui::TitlebarOptions {
+                            title: Some("Rex".into()),
+                            appears_transparent: true,
+                            ..Default::default()
+                        }),
+                        window_background: gpui::WindowBackgroundAppearance::Transparent,
+                        window_decorations: Some(gpui::WindowDecorations::Client),
                         ..Default::default()
-                    }),
-                    window_background: gpui::WindowBackgroundAppearance::Transparent,
-                    window_decorations: Some(gpui::WindowDecorations::Client),
-                    ..Default::default()
-                },
-                |window, cx| {
-                    let workspace = cx.new(|cx| Workspace::new(control, events, target, host_label, cx));
-                    window.focus(&workspace.focus_handle(cx));
-                    workspace
-                },
-            )
-            .expect("opening the window");
-        // Present the launch's activation token once the window has drawn, to end the
-        // desktop's busy cursor.
-        let _ = window.update(cx, |_, window, _| {
-            window.on_next_frame(|window, _| activation::finish_startup(window));
+                    },
+                    |window, cx| {
+                        let workspace =
+                            cx.new(|cx| Workspace::new(control, events, target, host_label, cx));
+                        window.focus(&workspace.focus_handle(cx));
+                        workspace
+                    },
+                )
+                .expect("opening the window");
+            // Present the launch's activation token once the window has drawn, to end the
+            // desktop's busy cursor.
+            let _ = window.update(cx, |_, window, _| {
+                window.on_next_frame(|window, _| activation::finish_startup(window));
+            });
+            cx.on_window_closed(|cx| {
+                if cx.windows().is_empty() {
+                    cx.quit();
+                }
+            })
+            .detach();
+            cx.activate(true);
         });
-        cx.on_window_closed(|cx| {
-            if cx.windows().is_empty() {
-                cx.quit();
-            }
-        })
-        .detach();
-        cx.activate(true);
-    });
 }

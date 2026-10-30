@@ -11,7 +11,9 @@ use crate::rex::control::Control;
 
 pub async fn run(control: Control, target: &str, command: Option<String>) -> Result<()> {
     let session_id = resolve(&control, target).await?;
-    let reply = control.call("session.attach", json!({"session_id": session_id})).await?;
+    let reply = control
+        .call("session.attach", json!({"session_id": session_id}))
+        .await?;
     let view = &reply["view"];
     let active = view["active_window_id"].as_str().unwrap_or_default();
     let window = view["windows"]
@@ -20,7 +22,10 @@ pub async fn run(control: Control, target: &str, command: Option<String>) -> Res
         .flatten()
         .find(|w| w["window_id"] == active)
         .context("no active window")?;
-    let block_id = window["focused_block_id"].as_str().context("no focused block")?.to_string();
+    let block_id = window["focused_block_id"]
+        .as_str()
+        .context("no focused block")?
+        .to_string();
 
     let started = std::time::Instant::now();
     let copy = mirror::start(control.clone(), session_id.clone(), block_id.clone());
@@ -28,29 +33,47 @@ pub async fn run(control: Control, target: &str, command: Option<String>) -> Res
     loop {
         match tokio::time::timeout(Duration::from_secs(5), copy.events.recv()).await {
             Ok(Ok(MirrorEvent::Status(None))) => break,
-            Ok(Ok(MirrorEvent::Status(Some(status)))) if status.starts_with("Reconnecting") => bail!("{status}"),
+            Ok(Ok(MirrorEvent::Status(Some(status)))) if status.starts_with("Reconnecting") => {
+                bail!("{status}")
+            }
             Ok(Ok(_)) => {}
             Ok(Err(_)) => bail!("the mirror stopped"),
             Err(_) => bail!("the copy didn't go live within 5 s"),
         }
     }
-    eprintln!("live after {:.0} ms", started.elapsed().as_secs_f64() * 1000.);
+    eprintln!(
+        "live after {:.0} ms",
+        started.elapsed().as_secs_f64() * 1000.
+    );
 
     if let Some(command) = command {
         let data = format!("{command}\n");
         control
-            .block_call("com.superlogical.terminal.write", &session_id, &block_id, json!({"data": data}))
+            .block_call(
+                "com.superlogical.terminal.write",
+                &session_id,
+                &block_id,
+                json!({"data": data}),
+            )
             .await?;
     }
     tokio::time::sleep(Duration::from_millis(1500)).await;
 
     let server = control
-        .block_call("com.superlogical.terminal.format", &session_id, &block_id, json!({"format": "text", "trim": true}))
+        .block_call(
+            "com.superlogical.terminal.format",
+            &session_id,
+            &block_id,
+            json!({"format": "text", "trim": true}),
+        )
         .await?;
     let server = trimmed_lines(server["content"].as_str().unwrap_or_default());
     let (local, size) = {
         let shared = copy.term.lock().unwrap();
-        (trimmed_lines(&shared.term.plain_text()), (shared.term.cols(), shared.term.rows()))
+        (
+            trimmed_lines(&shared.term.plain_text()),
+            (shared.term.cols(), shared.term.rows()),
+        )
     };
     // Both include scrollback; compare as many of the last lines as both have.
     let n = local.len().min(server.len());
@@ -66,7 +89,10 @@ pub async fn run(control: Control, target: &str, command: Option<String>) -> Res
         return Ok(());
     }
     for i in mismatches.iter().take(10) {
-        println!("line {i}:\n  local : {:?}\n  server: {:?}", local[*i], server[*i]);
+        println!(
+            "line {i}:\n  local : {:?}\n  server: {:?}",
+            local[*i], server[*i]
+        );
     }
     bail!("{} of {n} lines differ from the server", mismatches.len())
 }

@@ -71,7 +71,9 @@ fn physical_key(key: &str) -> Option<(&'static str, Option<char>, bool)> {
     }
 
     if let Some(n) = key.strip_prefix('f').and_then(|n| n.parse::<usize>().ok()) {
-        return FKEYS.get(n.wrapping_sub(1)).map(|code| (*code, None, false));
+        return FKEYS
+            .get(n.wrapping_sub(1))
+            .map(|code| (*code, None, false));
     }
     let code = match key {
         "enter" => "enter",
@@ -117,7 +119,11 @@ pub fn client_key(keystroke: &Keystroke, repeat: bool) -> Option<Value> {
         _ => "",
     };
     // The layout spent shift to produce the text, such as `A` or `!`.
-    let consumed = if shift && !text.is_empty() { "shift" } else { "" };
+    let consumed = if shift && !text.is_empty() {
+        "shift"
+    } else {
+        ""
+    };
     Some(json!({
         "key": code,
         "mods": mods,

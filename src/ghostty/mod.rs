@@ -37,7 +37,11 @@ fn rgb(c: ffi::GhosttyColorRgb) -> Rgb {
 }
 
 fn color(c: Rgb) -> ffi::GhosttyColorRgb {
-    ffi::GhosttyColorRgb { r: c.0, g: c.1, b: c.2 }
+    ffi::GhosttyColorRgb {
+        r: c.0,
+        g: c.1,
+        b: c.2,
+    }
 }
 
 /// A point on screen, in cells from the top-left of the visible area.
@@ -77,7 +81,10 @@ impl Drop for Terminal {
 impl Terminal {
     pub fn new(cols: u16, rows: u16) -> Result<Self> {
         let mut term = null_mut();
-        check(unsafe { ffi::ghostty_terminal_new(null(), &mut term, cols.max(1), rows.max(1)) }, "creating a terminal")?;
+        check(
+            unsafe { ffi::ghostty_terminal_new(null(), &mut term, cols.max(1), rows.max(1)) },
+            "creating a terminal",
+        )?;
         Ok(Self(term))
     }
 
@@ -85,7 +92,14 @@ impl Terminal {
     pub fn from_snapshot(bytes: &[u8]) -> Result<Self> {
         let mut decoder = null_mut();
         check(
-            unsafe { ffi::ghostty_snapshot_decoder_new_buf(null(), &mut decoder, bytes.as_ptr(), bytes.len()) },
+            unsafe {
+                ffi::ghostty_snapshot_decoder_new_buf(
+                    null(),
+                    &mut decoder,
+                    bytes.as_ptr(),
+                    bytes.len(),
+                )
+            },
             "starting the snapshot decoder",
         )?;
         let compress = true;
@@ -110,12 +124,21 @@ impl Terminal {
     }
 
     pub fn resize(&mut self, cols: u16, rows: u16, cell_width: u32, cell_height: u32) {
-        unsafe { ffi::ghostty_terminal_resize(self.0, cols.max(1), rows.max(1), cell_width.max(1), cell_height.max(1)) };
+        unsafe {
+            ffi::ghostty_terminal_resize(
+                self.0,
+                cols.max(1),
+                rows.max(1),
+                cell_width.max(1),
+                cell_height.max(1),
+            )
+        };
     }
 
     fn get<T: Default>(&self, data: ffi::GhosttyTerminalData) -> Option<T> {
         let mut out = T::default();
-        let code = unsafe { ffi::ghostty_terminal_get(self.0, data, &mut out as *mut T as *mut c_void) };
+        let code =
+            unsafe { ffi::ghostty_terminal_get(self.0, data, &mut out as *mut T as *mut c_void) };
         (code == ffi::GHOSTTY_SUCCESS).then_some(out)
     }
 
@@ -128,19 +151,39 @@ impl Terminal {
     }
 
     /// Set the default colors, which a program's own color changes still override.
-    pub fn set_default_colors(&mut self, fg: Rgb, bg: Rgb, cursor: Option<Rgb>, palette: &[Rgb; 256]) {
+    pub fn set_default_colors(
+        &mut self,
+        fg: Rgb,
+        bg: Rgb,
+        cursor: Option<Rgb>,
+        palette: &[Rgb; 256],
+    ) {
         let palette: Vec<ffi::GhosttyColorRgb> = palette.iter().copied().map(color).collect();
         let (fg, bg) = (color(fg), color(bg));
         let cursor = cursor.map(color);
         unsafe {
-            ffi::ghostty_terminal_set(self.0, ffi::GHOSTTY_TERMINAL_OPT_COLOR_FOREGROUND, &fg as *const _ as *const c_void);
-            ffi::ghostty_terminal_set(self.0, ffi::GHOSTTY_TERMINAL_OPT_COLOR_BACKGROUND, &bg as *const _ as *const c_void);
+            ffi::ghostty_terminal_set(
+                self.0,
+                ffi::GHOSTTY_TERMINAL_OPT_COLOR_FOREGROUND,
+                &fg as *const _ as *const c_void,
+            );
+            ffi::ghostty_terminal_set(
+                self.0,
+                ffi::GHOSTTY_TERMINAL_OPT_COLOR_BACKGROUND,
+                &bg as *const _ as *const c_void,
+            );
             ffi::ghostty_terminal_set(
                 self.0,
                 ffi::GHOSTTY_TERMINAL_OPT_COLOR_CURSOR,
-                cursor.as_ref().map_or(null(), |c| c as *const _ as *const c_void),
+                cursor
+                    .as_ref()
+                    .map_or(null(), |c| c as *const _ as *const c_void),
             );
-            ffi::ghostty_terminal_set(self.0, ffi::GHOSTTY_TERMINAL_OPT_COLOR_PALETTE, palette.as_ptr() as *const c_void);
+            ffi::ghostty_terminal_set(
+                self.0,
+                ffi::GHOSTTY_TERMINAL_OPT_COLOR_PALETTE,
+                palette.as_ptr() as *const c_void,
+            );
         }
     }
 
@@ -161,8 +204,14 @@ impl Terminal {
     }
 
     pub fn scrollbar(&self) -> Scrollbar {
-        let s: ffi::GhosttyTerminalScrollbar = self.get(ffi::GHOSTTY_TERMINAL_DATA_SCROLLBAR).unwrap_or_default();
-        Scrollbar { total: s.total, offset: s.offset, len: s.len }
+        let s: ffi::GhosttyTerminalScrollbar = self
+            .get(ffi::GHOSTTY_TERMINAL_DATA_SCROLLBAR)
+            .unwrap_or_default();
+        Scrollbar {
+            total: s.total,
+            offset: s.offset,
+            len: s.len,
+        }
     }
 
     /// Whether the view shows the newest output.
@@ -173,15 +222,23 @@ impl Terminal {
 
     /// Whether a DEC private mode, such as 2004 for bracketed paste, is on.
     pub fn dec_mode(&self, mode: u16) -> bool {
-        let mut config = ffi::GhosttyTerminalModeConfig { mode: mode & 0x7fff, value: false };
+        let mut config = ffi::GhosttyTerminalModeConfig {
+            mode: mode & 0x7fff,
+            value: false,
+        };
         let code = unsafe {
-            ffi::ghostty_terminal_get(self.0, ffi::GHOSTTY_TERMINAL_DATA_MODE, &mut config as *mut _ as *mut c_void)
+            ffi::ghostty_terminal_get(
+                self.0,
+                ffi::GHOSTTY_TERMINAL_DATA_MODE,
+                &mut config as *mut _ as *mut c_void,
+            )
         };
         code == ffi::GHOSTTY_SUCCESS && config.value
     }
 
     pub fn mouse_tracking(&self) -> bool {
-        self.get::<bool>(ffi::GHOSTTY_TERMINAL_DATA_MOUSE_TRACKING).unwrap_or(false)
+        self.get::<bool>(ffi::GHOSTTY_TERMINAL_DATA_MOUSE_TRACKING)
+            .unwrap_or(false)
     }
 
     pub fn alternate_screen(&self) -> bool {
@@ -191,8 +248,14 @@ impl Terminal {
 
     /// The cell at `point`, as a reference that stays valid until the terminal changes.
     fn grid_ref(&self, point: ViewportPoint) -> Option<ffi::GhosttyGridRef> {
-        let mut p = ffi::GhosttyPoint { tag: ffi::GHOSTTY_POINT_TAG_VIEWPORT, ..Default::default() };
-        p.value.coordinate = ffi::GhosttyPointCoordinate { x: point.x, y: point.y as u32 };
+        let mut p = ffi::GhosttyPoint {
+            tag: ffi::GHOSTTY_POINT_TAG_VIEWPORT,
+            ..Default::default()
+        };
+        p.value.coordinate = ffi::GhosttyPointCoordinate {
+            x: point.x,
+            y: point.y as u32,
+        };
         let mut out = sized!(ffi::GhosttyGridRef);
         let code = unsafe { ffi::ghostty_terminal_grid_ref(self.0, p, &mut out) };
         (code == ffi::GHOSTTY_SUCCESS).then_some(out)
@@ -205,7 +268,9 @@ impl Terminal {
 
     /// Select from `start` to `end`, both included, in reading order or not.
     pub fn select(&mut self, start: ViewportPoint, end: ViewportPoint) {
-        let (Some(start), Some(end)) = (self.grid_ref(start), self.grid_ref(end)) else { return };
+        let (Some(start), Some(end)) = (self.grid_ref(start), self.grid_ref(end)) else {
+            return;
+        };
         let mut selection = sized!(ffi::GhosttySelection);
         selection.start = start;
         selection.end = end;
@@ -217,7 +282,9 @@ impl Terminal {
         let mut options = sized!(ffi::GhosttyTerminalSelectWordOptions);
         options.ref_ = at;
         let mut selection = sized!(ffi::GhosttySelection);
-        if unsafe { ffi::ghostty_terminal_select_word(self.0, &options, &mut selection) } == ffi::GHOSTTY_SUCCESS {
+        if unsafe { ffi::ghostty_terminal_select_word(self.0, &options, &mut selection) }
+            == ffi::GHOSTTY_SUCCESS
+        {
             self.set_selection(Some(&selection));
         }
     }
@@ -227,7 +294,9 @@ impl Terminal {
         let mut options = sized!(ffi::GhosttyTerminalSelectLineOptions);
         options.ref_ = at;
         let mut selection = sized!(ffi::GhosttySelection);
-        if unsafe { ffi::ghostty_terminal_select_line(self.0, &options, &mut selection) } == ffi::GHOSTTY_SUCCESS {
+        if unsafe { ffi::ghostty_terminal_select_line(self.0, &options, &mut selection) }
+            == ffi::GHOSTTY_SUCCESS
+        {
             self.set_selection(Some(&selection));
         }
     }
@@ -239,7 +308,11 @@ impl Terminal {
     pub fn has_selection(&self) -> bool {
         let mut selection = sized!(ffi::GhosttySelection);
         let code = unsafe {
-            ffi::ghostty_terminal_get(self.0, ffi::GHOSTTY_TERMINAL_DATA_SELECTION, &mut selection as *mut _ as *mut c_void)
+            ffi::ghostty_terminal_get(
+                self.0,
+                ffi::GHOSTTY_TERMINAL_DATA_SELECTION,
+                &mut selection as *mut _ as *mut c_void,
+            )
         };
         code == ffi::GHOSTTY_SUCCESS
     }
@@ -251,11 +324,20 @@ impl Terminal {
         options.unwrap = true;
         options.trim = true;
         let (mut ptr, mut len) = (null_mut(), 0usize);
-        let code = unsafe { ffi::ghostty_terminal_selection_format_alloc(self.0, null(), options, &mut ptr, &mut len) };
+        let code = unsafe {
+            ffi::ghostty_terminal_selection_format_alloc(
+                self.0,
+                null(),
+                options,
+                &mut ptr,
+                &mut len,
+            )
+        };
         if code != ffi::GHOSTTY_SUCCESS || ptr.is_null() {
             return None;
         }
-        let text = unsafe { String::from_utf8_lossy(std::slice::from_raw_parts(ptr, len)).into_owned() };
+        let text =
+            unsafe { String::from_utf8_lossy(std::slice::from_raw_parts(ptr, len)).into_owned() };
         unsafe { ffi::ghostty_free(null(), ptr, len) };
         Some(text)
     }
@@ -266,13 +348,18 @@ impl Terminal {
         options.emit = ffi::GHOSTTY_FORMATTER_FORMAT_PLAIN;
         options.trim = true;
         let mut formatter = null_mut();
-        if unsafe { ffi::ghostty_formatter_terminal_new(null(), &mut formatter, self.0, options) } != ffi::GHOSTTY_SUCCESS {
+        if unsafe { ffi::ghostty_formatter_terminal_new(null(), &mut formatter, self.0, options) }
+            != ffi::GHOSTTY_SUCCESS
+        {
             return String::new();
         }
         let (mut ptr, mut len) = (null_mut(), 0usize);
-        let code = unsafe { ffi::ghostty_formatter_format_alloc(formatter, null(), &mut ptr, &mut len) };
+        let code =
+            unsafe { ffi::ghostty_formatter_format_alloc(formatter, null(), &mut ptr, &mut len) };
         let text = if code == ffi::GHOSTTY_SUCCESS && !ptr.is_null() {
-            let text = unsafe { String::from_utf8_lossy(std::slice::from_raw_parts(ptr, len)).into_owned() };
+            let text = unsafe {
+                String::from_utf8_lossy(std::slice::from_raw_parts(ptr, len)).into_owned()
+            };
             unsafe { ffi::ghostty_free(null(), ptr, len) };
             text
         } else {
@@ -361,11 +448,26 @@ impl RenderState {
     pub fn new() -> Result<Self> {
         let (mut state, mut rows, mut cells) = (null_mut(), null_mut(), null_mut());
         unsafe {
-            check(ffi::ghostty_render_state_new(null(), &mut state), "creating a render state")?;
-            check(ffi::ghostty_render_state_row_iterator_new(null(), &mut rows), "creating a row iterator")?;
-            check(ffi::ghostty_render_state_row_cells_new(null(), &mut cells), "creating a cell iterator")?;
+            check(
+                ffi::ghostty_render_state_new(null(), &mut state),
+                "creating a render state",
+            )?;
+            check(
+                ffi::ghostty_render_state_row_iterator_new(null(), &mut rows),
+                "creating a row iterator",
+            )?;
+            check(
+                ffi::ghostty_render_state_row_cells_new(null(), &mut cells),
+                "creating a cell iterator",
+            )?;
         }
-        Ok(Self { state, rows, cells, cache: Vec::new(), stale: true })
+        Ok(Self {
+            state,
+            rows,
+            cells,
+            cache: Vec::new(),
+            stale: true,
+        })
     }
 
     /// Copy the terminal's current state. Call it with the terminal locked; reading the copy
@@ -380,7 +482,10 @@ impl RenderState {
     }
 
     fn get<T>(&self, data: ffi::GhosttyRenderStateData, out: &mut T) -> bool {
-        unsafe { ffi::ghostty_render_state_get(self.state, data, out as *mut T as *mut c_void) == ffi::GHOSTTY_SUCCESS }
+        unsafe {
+            ffi::ghostty_render_state_get(self.state, data, out as *mut T as *mut c_void)
+                == ffi::GHOSTTY_SUCCESS
+        }
     }
 
     /// The frame to draw. Rows that haven't changed since the last frame come from the cache.
@@ -396,7 +501,9 @@ impl RenderState {
             shape: match c.visual_style {
                 ffi::GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_BAR => CursorShape::Bar,
                 ffi::GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_UNDERLINE => CursorShape::Underline,
-                ffi::GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_BLOCK_HOLLOW => CursorShape::HollowBlock,
+                ffi::GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_BLOCK_HOLLOW => {
+                    CursorShape::HollowBlock
+                }
                 _ => CursorShape::Block,
             },
         });
@@ -414,7 +521,8 @@ impl RenderState {
             self.get(ffi::GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR, &mut iterator);
             unsafe {
                 let mut y = 0;
-                while ffi::ghostty_render_state_row_iterator_next(self.rows) && y < self.cache.len() {
+                while ffi::ghostty_render_state_row_iterator_next(self.rows) && y < self.cache.len()
+                {
                     let mut row_dirty = true;
                     if !full {
                         ffi::ghostty_render_state_row_get(
@@ -454,23 +562,42 @@ impl RenderState {
 
     /// The cell the cell iterator is on.
     unsafe fn cell(&self) -> Cell {
-        let get = |data, out: *mut c_void| unsafe { ffi::ghostty_render_state_row_cells_get(self.cells, data, out) };
+        let get = |data, out: *mut c_void| unsafe {
+            ffi::ghostty_render_state_row_cells_get(self.cells, data, out)
+        };
         let mut len: u32 = 0;
-        get(ffi::GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_LEN, &mut len as *mut _ as *mut c_void);
+        get(
+            ffi::GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_LEN,
+            &mut len as *mut _ as *mut c_void,
+        );
         let text = if len == 0 {
             String::new()
         } else {
             let mut codepoints = vec![0u32; len as usize];
-            get(ffi::GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_BUF, codepoints.as_mut_ptr() as *mut c_void);
+            get(
+                ffi::GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_BUF,
+                codepoints.as_mut_ptr() as *mut c_void,
+            );
             codepoints.into_iter().filter_map(char::from_u32).collect()
         };
         let mut raw: ffi::GhosttyCell = Default::default();
-        get(ffi::GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_RAW, &mut raw as *mut _ as *mut c_void);
+        get(
+            ffi::GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_RAW,
+            &mut raw as *mut _ as *mut c_void,
+        );
         let mut wide: ffi::GhosttyCellWide = ffi::GHOSTTY_CELL_WIDE_NARROW;
-        unsafe { ffi::ghostty_cell_get(raw, ffi::GHOSTTY_CELL_DATA_WIDE, &mut wide as *mut _ as *mut c_void) };
+        unsafe {
+            ffi::ghostty_cell_get(
+                raw,
+                ffi::GHOSTTY_CELL_DATA_WIDE,
+                &mut wide as *mut _ as *mut c_void,
+            )
+        };
         let width = match wide {
             ffi::GHOSTTY_CELL_WIDE_WIDE => Width::Wide,
-            ffi::GHOSTTY_CELL_WIDE_SPACER_TAIL | ffi::GHOSTTY_CELL_WIDE_SPACER_HEAD => Width::Spacer,
+            ffi::GHOSTTY_CELL_WIDE_SPACER_TAIL | ffi::GHOSTTY_CELL_WIDE_SPACER_HEAD => {
+                Width::Spacer
+            }
             _ => Width::Narrow,
         };
         let color = |data| {
@@ -479,12 +606,21 @@ impl RenderState {
         };
         let mut style = sized!(ffi::GhosttyStyle);
         let mut styled = false;
-        get(ffi::GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_HAS_STYLING, &mut styled as *mut _ as *mut c_void);
+        get(
+            ffi::GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_HAS_STYLING,
+            &mut styled as *mut _ as *mut c_void,
+        );
         if styled {
-            get(ffi::GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_STYLE, &mut style as *mut _ as *mut c_void);
+            get(
+                ffi::GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_STYLE,
+                &mut style as *mut _ as *mut c_void,
+            );
         }
         let mut selected = false;
-        get(ffi::GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_SELECTED, &mut selected as *mut _ as *mut c_void);
+        get(
+            ffi::GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_SELECTED,
+            &mut selected as *mut _ as *mut c_void,
+        );
         Cell {
             text,
             fg: color(ffi::GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_FG_COLOR),
@@ -515,8 +651,15 @@ mod tests {
         let frame = state.frame();
         assert_eq!(frame.rows.len(), 3);
         let row = &frame.rows[0];
-        let text: String = row.iter().filter(|c| c.width != Width::Spacer).map(|c| c.text.as_str()).collect();
-        assert!(text.starts_with("hired日本") || text.starts_with("hi"), "{text:?}");
+        let text: String = row
+            .iter()
+            .filter(|c| c.width != Width::Spacer)
+            .map(|c| c.text.as_str())
+            .collect();
+        assert!(
+            text.starts_with("hired日本") || text.starts_with("hi"),
+            "{text:?}"
+        );
         assert!(row[3].bold);
         assert!(row[3].fg.is_some());
         assert_eq!(row[7].width, Width::Wide);
@@ -538,7 +681,18 @@ mod tests {
     #[test]
     fn redraws_changed_rows_from_the_cache() {
         let text = |frame: &Frame, y: usize| -> String {
-            frame.rows[y].iter().map(|c| if c.text.is_empty() { " " } else { c.text.as_str() }).collect::<String>().trim_end().to_string()
+            frame.rows[y]
+                .iter()
+                .map(|c| {
+                    if c.text.is_empty() {
+                        " "
+                    } else {
+                        c.text.as_str()
+                    }
+                })
+                .collect::<String>()
+                .trim_end()
+                .to_string()
         };
         let mut term = Terminal::new(20, 3).unwrap();
         let mut state = RenderState::new().unwrap();
@@ -552,7 +706,10 @@ mod tests {
         term.write(b"\x1b[2;1Hdos");
         state.update(&term);
         let frame = state.frame();
-        assert_eq!((text(&frame, 0), text(&frame, 1)), ("one".to_string(), "dos".to_string()));
+        assert_eq!(
+            (text(&frame, 0), text(&frame, 1)),
+            ("one".to_string(), "dos".to_string())
+        );
         // A selection marks its rows dirty.
         term.select(ViewportPoint { x: 0, y: 0 }, ViewportPoint { x: 2, y: 0 });
         state.update(&term);
@@ -569,7 +726,9 @@ mod tests {
         let mut size = 0;
         unsafe { ffi::ghostty_snapshot_encode_buf(term.0, null_mut(), 0, &mut size) };
         let mut buf = vec![0u8; size];
-        let code = unsafe { ffi::ghostty_snapshot_encode_buf(term.0, buf.as_mut_ptr(), buf.len(), &mut size) };
+        let code = unsafe {
+            ffi::ghostty_snapshot_encode_buf(term.0, buf.as_mut_ptr(), buf.len(), &mut size)
+        };
         assert_eq!(code, ffi::GHOSTTY_SUCCESS);
         let restored = Terminal::from_snapshot(&buf[..size]).unwrap();
         assert!(restored.plain_text().starts_with("from the snapshot"));

@@ -64,7 +64,6 @@ impl Control {
         mut ws: super::endpoint::Ws,
         endpoint: Endpoint,
     ) -> Result<(Self, async_channel::Receiver<Event>)> {
-
         let hello = json!({
             "type": "hello",
             "api_revision": API_REVISION,
@@ -78,7 +77,11 @@ impl Control {
         });
         ws.send(Message::text(hello.to_string())).await?;
         let welcome: Value = loop {
-            match ws.next().await.ok_or_else(|| anyhow!("server closed before welcome"))?? {
+            match ws
+                .next()
+                .await
+                .ok_or_else(|| anyhow!("server closed before welcome"))??
+            {
                 Message::Text(text) => break serde_json::from_str(&text)?,
                 Message::Close(frame) => bail!("server refused the connection: {frame:?}"),
                 _ => continue,
@@ -87,7 +90,10 @@ impl Control {
         if welcome["type"] != "welcome" || welcome["protocol"] != "rex.control.v1" {
             bail!("unexpected welcome: {welcome}");
         }
-        let client_id = welcome["client"]["id"].as_str().unwrap_or_default().to_string();
+        let client_id = welcome["client"]["id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
 
         let (outgoing, mut outgoing_rx) = mpsc::unbounded_channel::<Option<String>>();
         let (events_tx, events_rx) = async_channel::unbounded();
@@ -107,7 +113,9 @@ impl Control {
         tokio::spawn(async move {
             while let Some(Ok(msg)) = stream.next().await {
                 let Message::Text(text) = msg else { continue };
-                let Ok(msg) = serde_json::from_str::<Value>(&text) else { continue };
+                let Ok(msg) = serde_json::from_str::<Value>(&text) else {
+                    continue;
+                };
                 match msg["type"].as_str() {
                     Some("response") => {
                         let id = msg["id"].as_str().unwrap_or_default();
@@ -127,7 +135,7 @@ impl Control {
                     Some("event") => {
                         let inner = &msg["payload"];
                         let event = Event {
-                                            kind: inner["type"].as_str().unwrap_or_default().to_string(),
+                            kind: inner["type"].as_str().unwrap_or_default().to_string(),
                             payload: inner["payload"].clone(),
                         };
                         // A connection kept only for calls, such as the local one that holds

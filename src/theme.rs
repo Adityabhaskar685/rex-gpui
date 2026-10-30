@@ -62,12 +62,25 @@ static BUILT_IN: &[AppTheme] = &[
         name: Cow::Borrowed("Rex Dark"),
         source: Source::BuiltIn,
         ui: Ui {
-            window: 0x161518, card_border: 0x2c2a2f, card_border_focused: 0x4a4750, tab_active: 0x29272c,
-            tab_active_border: 0x3b3940, hover: 0x232126, text: 0xe8e6ea, text_dim: 0x9b98a0,
-            text_faint: 0x6c6971, menu: 0x1f1e22, accent: 0x3d5afe, danger: 0xe5484d,
+            window: 0x161518,
+            card_border: 0x2c2a2f,
+            card_border_focused: 0x4a4750,
+            tab_active: 0x29272c,
+            tab_active_border: 0x3b3940,
+            hover: 0x232126,
+            text: 0xe8e6ea,
+            text_dim: 0x9b98a0,
+            text_faint: 0x6c6971,
+            menu: 0x1f1e22,
+            accent: 0x3d5afe,
+            danger: 0xe5484d,
         },
         term: TermColors {
-            foreground: 0xe6e3e8, background: 0x1f1e22, cursor: 0xe6e3e8, selection: 0x45475a, selection_fg: None,
+            foreground: 0xe6e3e8,
+            background: 0x1f1e22,
+            cursor: 0xe6e3e8,
+            selection: 0x45475a,
+            selection_fg: None,
             ansi: [
                 0x45475a, 0xf38ba8, 0xa6e3a1, 0xf9e2af, 0x89b4fa, 0xf5c2e7, 0x94e2d5, 0xbac2de,
                 0x585b70, 0xf38ba8, 0xa6e3a1, 0xf9e2af, 0x89b4fa, 0xf5c2e7, 0x94e2d5, 0xa6adc8,
@@ -78,12 +91,25 @@ static BUILT_IN: &[AppTheme] = &[
         name: Cow::Borrowed("Catppuccin Mocha"),
         source: Source::BuiltIn,
         ui: Ui {
-            window: 0x11111b, card_border: 0x313244, card_border_focused: 0x585b70, tab_active: 0x313244,
-            tab_active_border: 0x45475a, hover: 0x1e1e2e, text: 0xcdd6f4, text_dim: 0xa6adc8,
-            text_faint: 0x6c7086, menu: 0x181825, accent: 0x89b4fa, danger: 0xf38ba8,
+            window: 0x11111b,
+            card_border: 0x313244,
+            card_border_focused: 0x585b70,
+            tab_active: 0x313244,
+            tab_active_border: 0x45475a,
+            hover: 0x1e1e2e,
+            text: 0xcdd6f4,
+            text_dim: 0xa6adc8,
+            text_faint: 0x6c7086,
+            menu: 0x181825,
+            accent: 0x89b4fa,
+            danger: 0xf38ba8,
         },
         term: TermColors {
-            foreground: 0xcdd6f4, background: 0x1e1e2e, cursor: 0xf5e0dc, selection: 0x45475a, selection_fg: None,
+            foreground: 0xcdd6f4,
+            background: 0x1e1e2e,
+            cursor: 0xf5e0dc,
+            selection: 0x45475a,
+            selection_fg: None,
             ansi: [
                 0x45475a, 0xf38ba8, 0xa6e3a1, 0xf9e2af, 0x89b4fa, 0xf5c2e7, 0x94e2d5, 0xbac2de,
                 0x585b70, 0xf38ba8, 0xa6e3a1, 0xf9e2af, 0x89b4fa, 0xf5c2e7, 0x94e2d5, 0xa6adc8,
@@ -94,12 +120,25 @@ static BUILT_IN: &[AppTheme] = &[
         name: Cow::Borrowed("Tokyo Night"),
         source: Source::BuiltIn,
         ui: Ui {
-            window: 0x16161e, card_border: 0x292e42, card_border_focused: 0x414868, tab_active: 0x292e42,
-            tab_active_border: 0x3b4261, hover: 0x1f2335, text: 0xc0caf5, text_dim: 0x9aa5ce,
-            text_faint: 0x565f89, menu: 0x1a1b26, accent: 0x7aa2f7, danger: 0xf7768e,
+            window: 0x16161e,
+            card_border: 0x292e42,
+            card_border_focused: 0x414868,
+            tab_active: 0x292e42,
+            tab_active_border: 0x3b4261,
+            hover: 0x1f2335,
+            text: 0xc0caf5,
+            text_dim: 0x9aa5ce,
+            text_faint: 0x565f89,
+            menu: 0x1a1b26,
+            accent: 0x7aa2f7,
+            danger: 0xf7768e,
         },
         term: TermColors {
-            foreground: 0xc0caf5, background: 0x1a1b26, cursor: 0xc0caf5, selection: 0x33467c, selection_fg: None,
+            foreground: 0xc0caf5,
+            background: 0x1a1b26,
+            cursor: 0xc0caf5,
+            selection: 0x33467c,
+            selection_fg: None,
             ansi: [
                 0x15161e, 0xf7768e, 0x9ece6a, 0xe0af68, 0x7aa2f7, 0xbb9af7, 0x7dcfff, 0xa9b1d6,
                 0x414868, 0xf7768e, 0x9ece6a, 0xe0af68, 0x7aa2f7, 0xbb9af7, 0x7dcfff, 0xc0caf5,
@@ -110,12 +149,25 @@ static BUILT_IN: &[AppTheme] = &[
         name: Cow::Borrowed("Dracula"),
         source: Source::BuiltIn,
         ui: Ui {
-            window: 0x21222c, card_border: 0x343746, card_border_focused: 0x6272a4, tab_active: 0x343746,
-            tab_active_border: 0x44475a, hover: 0x2b2d3a, text: 0xf8f8f2, text_dim: 0xbfbfbf,
-            text_faint: 0x6272a4, menu: 0x282a36, accent: 0xbd93f9, danger: 0xff5555,
+            window: 0x21222c,
+            card_border: 0x343746,
+            card_border_focused: 0x6272a4,
+            tab_active: 0x343746,
+            tab_active_border: 0x44475a,
+            hover: 0x2b2d3a,
+            text: 0xf8f8f2,
+            text_dim: 0xbfbfbf,
+            text_faint: 0x6272a4,
+            menu: 0x282a36,
+            accent: 0xbd93f9,
+            danger: 0xff5555,
         },
         term: TermColors {
-            foreground: 0xf8f8f2, background: 0x282a36, cursor: 0xf8f8f2, selection: 0x44475a, selection_fg: None,
+            foreground: 0xf8f8f2,
+            background: 0x282a36,
+            cursor: 0xf8f8f2,
+            selection: 0x44475a,
+            selection_fg: None,
             ansi: [
                 0x21222c, 0xff5555, 0x50fa7b, 0xf1fa8c, 0xbd93f9, 0xff79c6, 0x8be9fd, 0xf8f8f2,
                 0x6272a4, 0xff6e6e, 0x69ff94, 0xffffa5, 0xd6acff, 0xff92df, 0xa4ffff, 0xffffff,
@@ -126,12 +178,25 @@ static BUILT_IN: &[AppTheme] = &[
         name: Cow::Borrowed("Gruvbox Dark"),
         source: Source::BuiltIn,
         ui: Ui {
-            window: 0x1d2021, card_border: 0x3c3836, card_border_focused: 0x665c54, tab_active: 0x3c3836,
-            tab_active_border: 0x504945, hover: 0x32302f, text: 0xebdbb2, text_dim: 0xbdae93,
-            text_faint: 0x7c6f64, menu: 0x282828, accent: 0x83a598, danger: 0xfb4934,
+            window: 0x1d2021,
+            card_border: 0x3c3836,
+            card_border_focused: 0x665c54,
+            tab_active: 0x3c3836,
+            tab_active_border: 0x504945,
+            hover: 0x32302f,
+            text: 0xebdbb2,
+            text_dim: 0xbdae93,
+            text_faint: 0x7c6f64,
+            menu: 0x282828,
+            accent: 0x83a598,
+            danger: 0xfb4934,
         },
         term: TermColors {
-            foreground: 0xebdbb2, background: 0x282828, cursor: 0xebdbb2, selection: 0x504945, selection_fg: None,
+            foreground: 0xebdbb2,
+            background: 0x282828,
+            cursor: 0xebdbb2,
+            selection: 0x504945,
+            selection_fg: None,
             ansi: [
                 0x282828, 0xcc241d, 0x98971a, 0xd79921, 0x458588, 0xb16286, 0x689d6a, 0xa89984,
                 0x928374, 0xfb4934, 0xb8bb26, 0xfabd2f, 0x83a598, 0xd3869b, 0x8ec07c, 0xebdbb2,
@@ -142,12 +207,25 @@ static BUILT_IN: &[AppTheme] = &[
         name: Cow::Borrowed("Nord"),
         source: Source::BuiltIn,
         ui: Ui {
-            window: 0x242933, card_border: 0x3b4252, card_border_focused: 0x4c566a, tab_active: 0x3b4252,
-            tab_active_border: 0x434c5e, hover: 0x2e3440, text: 0xeceff4, text_dim: 0xd8dee9,
-            text_faint: 0x7b88a1, menu: 0x2e3440, accent: 0x88c0d0, danger: 0xbf616a,
+            window: 0x242933,
+            card_border: 0x3b4252,
+            card_border_focused: 0x4c566a,
+            tab_active: 0x3b4252,
+            tab_active_border: 0x434c5e,
+            hover: 0x2e3440,
+            text: 0xeceff4,
+            text_dim: 0xd8dee9,
+            text_faint: 0x7b88a1,
+            menu: 0x2e3440,
+            accent: 0x88c0d0,
+            danger: 0xbf616a,
         },
         term: TermColors {
-            foreground: 0xd8dee9, background: 0x2e3440, cursor: 0xd8dee9, selection: 0x434c5e, selection_fg: None,
+            foreground: 0xd8dee9,
+            background: 0x2e3440,
+            cursor: 0xd8dee9,
+            selection: 0x434c5e,
+            selection_fg: None,
             ansi: [
                 0x3b4252, 0xbf616a, 0xa3be8c, 0xebcb8b, 0x81a1c1, 0xb48ead, 0x88c0d0, 0xe5e9f0,
                 0x4c566a, 0xbf616a, 0xa3be8c, 0xebcb8b, 0x81a1c1, 0xb48ead, 0x8fbcbb, 0xeceff4,
@@ -158,12 +236,25 @@ static BUILT_IN: &[AppTheme] = &[
         name: Cow::Borrowed("Solarized Dark"),
         source: Source::BuiltIn,
         ui: Ui {
-            window: 0x00212b, card_border: 0x073642, card_border_focused: 0x586e75, tab_active: 0x073642,
-            tab_active_border: 0x0d4654, hover: 0x02303b, text: 0x93a1a1, text_dim: 0x839496,
-            text_faint: 0x586e75, menu: 0x002b36, accent: 0x268bd2, danger: 0xdc322f,
+            window: 0x00212b,
+            card_border: 0x073642,
+            card_border_focused: 0x586e75,
+            tab_active: 0x073642,
+            tab_active_border: 0x0d4654,
+            hover: 0x02303b,
+            text: 0x93a1a1,
+            text_dim: 0x839496,
+            text_faint: 0x586e75,
+            menu: 0x002b36,
+            accent: 0x268bd2,
+            danger: 0xdc322f,
         },
         term: TermColors {
-            foreground: 0x839496, background: 0x002b36, cursor: 0x93a1a1, selection: 0x073642, selection_fg: None,
+            foreground: 0x839496,
+            background: 0x002b36,
+            cursor: 0x93a1a1,
+            selection: 0x073642,
+            selection_fg: None,
             ansi: [
                 0x073642, 0xdc322f, 0x859900, 0xb58900, 0x268bd2, 0xd33682, 0x2aa198, 0xeee8d5,
                 0x002b36, 0xcb4b16, 0x586e75, 0x657b83, 0x839496, 0x6c71c4, 0x93a1a1, 0xfdf6e3,
@@ -174,12 +265,25 @@ static BUILT_IN: &[AppTheme] = &[
         name: Cow::Borrowed("One Light"),
         source: Source::BuiltIn,
         ui: Ui {
-            window: 0xe5e5e6, card_border: 0xd0d0d3, card_border_focused: 0xa0a1a7, tab_active: 0xfafafa,
-            tab_active_border: 0xc9c9cc, hover: 0xdadadc, text: 0x383a42, text_dim: 0x696c77,
-            text_faint: 0x9d9fa6, menu: 0xf2f2f3, accent: 0x4078f2, danger: 0xe45649,
+            window: 0xe5e5e6,
+            card_border: 0xd0d0d3,
+            card_border_focused: 0xa0a1a7,
+            tab_active: 0xfafafa,
+            tab_active_border: 0xc9c9cc,
+            hover: 0xdadadc,
+            text: 0x383a42,
+            text_dim: 0x696c77,
+            text_faint: 0x9d9fa6,
+            menu: 0xf2f2f3,
+            accent: 0x4078f2,
+            danger: 0xe45649,
         },
         term: TermColors {
-            foreground: 0x383a42, background: 0xfafafa, cursor: 0x526fff, selection: 0xd8dde8, selection_fg: None,
+            foreground: 0x383a42,
+            background: 0xfafafa,
+            cursor: 0x526fff,
+            selection: 0xd8dde8,
+            selection_fg: None,
             ansi: [
                 0x383a42, 0xe45649, 0x50a14f, 0xc18401, 0x4078f2, 0xa626a4, 0x0184bc, 0xa0a1a7,
                 0x696c77, 0xe45649, 0x50a14f, 0xc18401, 0x4078f2, 0xa626a4, 0x0184bc, 0xffffff,
@@ -223,8 +327,12 @@ pub fn all() -> Vec<Arc<AppTheme>> {
 /// Make the theme named `name` current and save the choice. Returns false for an unknown name.
 pub fn select(name: &str) -> bool {
     let mut guard = REGISTRY.write().unwrap();
-    let Some(registry) = guard.as_mut() else { return false };
-    let Some(theme) = registry.themes.iter().find(|t| t.name == name).cloned() else { return false };
+    let Some(registry) = guard.as_mut() else {
+        return false;
+    };
+    let Some(theme) = registry.themes.iter().find(|t| t.name == name).cloned() else {
+        return false;
+    };
     registry.current = theme;
     drop(guard);
     if let Err(err) = crate::settings::set("theme", json!(name)) {
@@ -237,7 +345,9 @@ pub fn select(name: &str) -> bool {
 /// earlier one's with the same name.
 fn theme_dirs() -> Vec<PathBuf> {
     let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
-    let data = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".local/share"));
+    let data = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".local/share"));
     let mut dirs: Vec<PathBuf> = std::env::var("XDG_DATA_DIRS")
         .unwrap_or_else(|_| "/usr/local/share:/usr/share".into())
         .split(':')
@@ -262,7 +372,9 @@ pub fn load() {
     let mut themes: Vec<Arc<AppTheme>> = BUILT_IN.iter().cloned().map(Arc::new).collect();
     let mut files: std::collections::BTreeMap<String, AppTheme> = Default::default();
     for dir in theme_dirs() {
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for entry in entries.flatten() {
             let path = entry.path();
             if !path.is_file() {
@@ -277,14 +389,24 @@ pub fn load() {
         }
     }
     let built_in: Vec<String> = themes.iter().map(|t| t.name.to_lowercase()).collect();
-    themes.extend(files.into_values().filter(|t| !built_in.contains(&t.name.to_lowercase())).map(Arc::new));
+    themes.extend(
+        files
+            .into_values()
+            .filter(|t| !built_in.contains(&t.name.to_lowercase()))
+            .map(Arc::new),
+    );
 
     let wanted = std::env::var("REX_THEME")
         .ok()
         .or_else(|| crate::settings::get("theme").and_then(|v| v.as_str().map(str::to_string)))
         .or_else(ghostty_config_theme);
     let current = wanted
-        .and_then(|name| themes.iter().find(|t| t.name.eq_ignore_ascii_case(&name)).cloned())
+        .and_then(|name| {
+            themes
+                .iter()
+                .find(|t| t.name.eq_ignore_ascii_case(&name))
+                .cloned()
+        })
         .unwrap_or_else(|| themes[0].clone());
     *REGISTRY.write().unwrap() = Some(Registry { themes, current });
 }
@@ -309,30 +431,43 @@ pub fn import(paths: &[PathBuf]) -> anyhow::Result<String> {
 
 /// The `theme` in Ghostty's config. Its `light:X,dark:Y` form picks the dark one.
 fn ghostty_config_theme() -> Option<String> {
-    let text = std::fs::read_to_string(crate::settings::config_home().join("ghostty/config")).ok()?;
+    let text =
+        std::fs::read_to_string(crate::settings::config_home().join("ghostty/config")).ok()?;
     let value = text.lines().rev().find_map(|line| {
         let (key, value) = line.split_once('=')?;
         (key.trim() == "theme").then(|| value.trim().trim_matches('"').to_string())
     })?;
-    Some(match value.split(',').find_map(|part| part.trim().strip_prefix("dark:")) {
-        Some(dark) => dark.trim().to_string(),
-        None => value,
-    })
+    Some(
+        match value
+            .split(',')
+            .find_map(|part| part.trim().strip_prefix("dark:"))
+        {
+            Some(dark) => dark.trim().to_string(),
+            None => value,
+        },
+    )
 }
 
 /// Read a Ghostty theme file: `key = value` lines such as `background = #1e1e2e` and
 /// `palette = 4=#89b4fa`. The window's colors are derived from the terminal's.
 fn parse_ghostty(path: &Path) -> Option<AppTheme> {
     let text = std::fs::read_to_string(path).ok()?;
-    let name = path.file_name()?.to_str()?.trim_end_matches(".conf").to_string();
-    let (mut background, mut foreground, mut cursor, mut selection, mut selection_fg) = (None, None, None, None, None);
+    let name = path
+        .file_name()?
+        .to_str()?
+        .trim_end_matches(".conf")
+        .to_string();
+    let (mut background, mut foreground, mut cursor, mut selection, mut selection_fg) =
+        (None, None, None, None, None);
     let mut ansi: [Option<u32>; 16] = [None; 16];
     for line in text.lines() {
         let line = line.trim();
         if line.starts_with('#') {
             continue;
         }
-        let Some((key, value)) = line.split_once('=') else { continue };
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
         let value = value.trim();
         match key.trim() {
             "background" => background = hex(value),
@@ -364,7 +499,12 @@ fn parse_ghostty(path: &Path) -> Option<AppTheme> {
         selection_fg,
         ansi,
     };
-    Some(AppTheme { name: name.into(), source: Source::File(path.to_path_buf()), ui: derive_ui(&term), term })
+    Some(AppTheme {
+        name: name.into(),
+        source: Source::File(path.to_path_buf()),
+        ui: derive_ui(&term),
+        term,
+    })
 }
 
 /// Chrome colors that sit well around a terminal with these colors.
@@ -372,7 +512,11 @@ fn derive_ui(term: &TermColors) -> Ui {
     let (bg, fg) = (term.background, term.foreground);
     let dark = luminance(bg) < 0.5;
     Ui {
-        window: if dark { mix(bg, 0x000000, 0.28) } else { mix(bg, 0x000000, 0.07) },
+        window: if dark {
+            mix(bg, 0x000000, 0.28)
+        } else {
+            mix(bg, 0x000000, 0.07)
+        },
         card_border: mix(bg, fg, 0.12),
         card_border_focused: mix(bg, fg, 0.3),
         tab_active: mix(bg, fg, if dark { 0.08 } else { 0.0 }),
@@ -389,7 +533,9 @@ fn derive_ui(term: &TermColors) -> Ui {
 
 fn hex(value: &str) -> Option<u32> {
     let value = value.trim().trim_start_matches('#');
-    (value.len() == 6).then(|| u32::from_str_radix(value, 16).ok()).flatten()
+    (value.len() == 6)
+        .then(|| u32::from_str_radix(value, 16).ok())
+        .flatten()
 }
 
 /// `a` moved `t` of the way towards `b`.

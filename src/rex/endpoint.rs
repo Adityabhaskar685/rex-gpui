@@ -24,7 +24,11 @@ pub type Ws = WebSocketStream<MaybeTlsStream<Box<dyn Io>>>;
 pub enum Endpoint {
     Unix(PathBuf),
     /// `http://host:port` or `https://host:port`, without a path.
-    Url { tls: bool, host: String, port: u16 },
+    Url {
+        tls: bool,
+        host: String,
+        port: u16,
+    },
 }
 
 impl Endpoint {
@@ -73,12 +77,17 @@ impl Endpoint {
         }
         let rest = rest.split('/').next().unwrap_or(rest);
         let (host, port) = match rest.rsplit_once(':') {
-            Some((host, port)) if !host.ends_with(']') || rest.starts_with('[') => {
-                (host.to_string(), Some(port.parse::<u16>().context("invalid port")?))
-            }
+            Some((host, port)) if !host.ends_with(']') || rest.starts_with('[') => (
+                host.to_string(),
+                Some(port.parse::<u16>().context("invalid port")?),
+            ),
             _ => (rest.to_string(), None),
         };
-        let url = |tls, port| Self::Url { tls, host: host.clone(), port };
+        let url = |tls, port| Self::Url {
+            tls,
+            host: host.clone(),
+            port,
+        };
         Ok(match (scheme, port) {
             (Some("https"), port) => vec![url(true, port.unwrap_or(443))],
             (Some("http"), port) => vec![url(false, port.unwrap_or(80))],
@@ -108,10 +117,12 @@ impl Endpoint {
             }
         };
         let mut request = url.into_client_request()?;
-        request
-            .headers_mut()
-            .insert("Sec-WebSocket-Protocol", HeaderValue::from_str(subprotocol)?);
-        let connecting = tokio_tungstenite::client_async_tls_with_config(request, stream, None, None);
+        request.headers_mut().insert(
+            "Sec-WebSocket-Protocol",
+            HeaderValue::from_str(subprotocol)?,
+        );
+        let connecting =
+            tokio_tungstenite::client_async_tls_with_config(request, stream, None, None);
         let (ws, _) = tokio::time::timeout(std::time::Duration::from_secs(10), connecting)
             .await
             .context("timed out opening the WebSocket")?
@@ -158,13 +169,18 @@ pub async fn resolve(server: &str) -> Result<Vec<Endpoint>> {
     if server == "local" {
         return Ok(vec![Endpoint::local()]);
     }
-    let looks_like_address = server.contains("://") || server.contains('.') || server.contains(':') || server.starts_with('/');
+    let looks_like_address = server.contains("://")
+        || server.contains('.')
+        || server.contains(':')
+        || server.starts_with('/');
     if !looks_like_address {
         if let Ok((local, _events)) = Control::connect(&[Endpoint::local()], false).await {
             if let Ok(reply) = local.call("hosts.list", json!({})).await {
-                let host = reply["hosts"].as_array().into_iter().flatten().find(|h| {
-                    h["label"] == server || h["id"] == server
-                });
+                let host = reply["hosts"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|h| h["label"] == server || h["id"] == server);
                 if let Some(host) = host {
                     let mut out = Vec::new();
                     for e in host["endpoints"].as_array().into_iter().flatten() {
@@ -187,18 +203,35 @@ mod tests {
     use super::*;
 
     fn url(tls: bool, host: &str, port: u16) -> Endpoint {
-        Endpoint::Url { tls, host: host.into(), port }
+        Endpoint::Url {
+            tls,
+            host: host.into(),
+            port,
+        }
     }
 
     #[test]
     fn parses_addresses_like_the_cli() {
         assert_eq!(
             Endpoint::candidates("build.example.ts.net").unwrap(),
-            [url(true, "build.example.ts.net", 443), url(true, "build.example.ts.net", 7297), url(false, "build.example.ts.net", 7297)]
+            [
+                url(true, "build.example.ts.net", 443),
+                url(true, "build.example.ts.net", 7297),
+                url(false, "build.example.ts.net", 7297)
+            ]
         );
-        assert_eq!(Endpoint::candidates("https://build.x.ts.net/").unwrap(), [url(true, "build.x.ts.net", 443)]);
-        assert_eq!(Endpoint::candidates("http://build:7297").unwrap(), [url(false, "build", 7297)]);
-        assert_eq!(Endpoint::candidates("10.0.0.2:7297").unwrap(), [url(true, "10.0.0.2", 7297), url(false, "10.0.0.2", 7297)]);
+        assert_eq!(
+            Endpoint::candidates("https://build.x.ts.net/").unwrap(),
+            [url(true, "build.x.ts.net", 443)]
+        );
+        assert_eq!(
+            Endpoint::candidates("http://build:7297").unwrap(),
+            [url(false, "build", 7297)]
+        );
+        assert_eq!(
+            Endpoint::candidates("10.0.0.2:7297").unwrap(),
+            [url(true, "10.0.0.2", 7297), url(false, "10.0.0.2", 7297)]
+        );
         assert!(Endpoint::candidates("https://root@build").is_err());
     }
 }

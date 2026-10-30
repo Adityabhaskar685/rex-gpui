@@ -5,16 +5,16 @@
 //! `rex hosts` edits, so a host added here works with `rex -S LABEL` and the other way round.
 
 use gpui::{
-    AppContext as _, Context, Entity, Focusable, FontWeight, MouseButton, SharedString, Subscription,
-    div, prelude::*, px, rgb,
+    AppContext as _, Context, Entity, Focusable, FontWeight, MouseButton, SharedString,
+    Subscription, div, prelude::*, px, rgb,
 };
 use serde_json::{Value, json};
 
-use crate::theme::ui;
 use super::{Workspace, icon};
 use crate::rex::control::Control;
 use crate::rex::endpoint::Endpoint;
 use crate::text_field::{TextField, TextFieldEvent};
+use crate::theme::ui;
 
 #[derive(Clone, Debug)]
 pub struct Host {
@@ -57,7 +57,10 @@ impl Workspace {
 
     /// The local server, which keeps the host list. Connects to it once when this window
     /// shows a remote server.
-    async fn home(this: &gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp) -> anyhow::Result<Control> {
+    async fn home(
+        this: &gpui::WeakEntity<Self>,
+        cx: &mut gpui::AsyncApp,
+    ) -> anyhow::Result<Control> {
         let existing = this.update(cx, |this, _| {
             if this.control.endpoint.is_local() {
                 Some(this.control.clone())
@@ -92,7 +95,11 @@ impl Workspace {
                             .filter_map(Host::from_value)
                             .collect();
                         if let Some(label) = this.pending_host_label.take() {
-                            this.current_host = this.hosts.iter().find(|h| h.label.eq_ignore_ascii_case(&label)).cloned();
+                            this.current_host = this
+                                .hosts
+                                .iter()
+                                .find(|h| h.label.eq_ignore_ascii_case(&label))
+                                .cloned();
                         }
                     }
                     Err(err) => this.notice = Some(format!("Can't read saved hosts: {err:#}")),
@@ -131,13 +138,17 @@ impl Workspace {
                 return;
             }
         };
-        let name = host.as_ref().map_or_else(|| self.host_name.clone(), |h| h.label.clone());
+        let name = host
+            .as_ref()
+            .map_or_else(|| self.host_name.clone(), |h| h.label.clone());
         self.notice = Some(format!("Connecting to {name}…"));
         cx.notify();
 
         let local = host.is_none();
         cx.spawn(async move |this, cx| {
-            let result = crate::runtime().spawn(async move { Control::connect(&endpoints, local).await }).await;
+            let result = crate::runtime()
+                .spawn(async move { Control::connect(&endpoints, local).await })
+                .await;
             let result = match result {
                 Ok(result) => result,
                 Err(err) => Err(err.into()),
@@ -208,17 +219,22 @@ impl Workspace {
 
     fn open_add_host(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) {
         let label = cx.new(|cx| TextField::new("dev93", cx));
-        let address = cx.new(|cx| TextField::new("dev93.tailnet.ts.net or http://10.0.0.93:7297", cx));
+        let address =
+            cx.new(|cx| TextField::new("dev93.tailnet.ts.net or http://10.0.0.93:7297", cx));
         let subscriptions = [&label, &address]
             .into_iter()
             .map(|field| {
-                cx.subscribe_in(field, window, |this, _, event: &TextFieldEvent, window, cx| match event {
-                    TextFieldEvent::Submit => this.submit_add_host(window, cx),
-                    TextFieldEvent::Cancel => {
-                        this.add_host = None;
-                        cx.notify();
-                    }
-                })
+                cx.subscribe_in(
+                    field,
+                    window,
+                    |this, _, event: &TextFieldEvent, window, cx| match event {
+                        TextFieldEvent::Submit => this.submit_add_host(window, cx),
+                        TextFieldEvent::Cancel => {
+                            this.add_host = None;
+                            cx.notify();
+                        }
+                    },
+                )
             })
             .collect();
         window.focus(&label.focus_handle(cx));
@@ -235,7 +251,9 @@ impl Workspace {
 
     /// Save the host on the local server, then connect to it.
     fn submit_add_host(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) {
-        let Some(dialog) = &mut self.add_host else { return };
+        let Some(dialog) = &mut self.add_host else {
+            return;
+        };
         let label = dialog.label.read(cx).text.trim().to_string();
         let address = dialog.address.read(cx).text.trim().to_string();
         // Enter in the label field moves on to the address.
@@ -305,9 +323,22 @@ impl Workspace {
                 .hover(|d| d.bg(rgb(ui().hover)))
         };
         let heading = |text: String| {
-            div().px_2().pt_2().pb_1().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(rgb(ui().text_faint)).child(text)
+            div()
+                .px_2()
+                .pt_2()
+                .pb_1()
+                .text_xs()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(ui().text_faint))
+                .child(text)
         };
-        let check = |on: bool| div().w(px(14.)).flex_none().text_color(rgb(ui().text)).child(if on { "✓" } else { "" });
+        let check = |on: bool| {
+            div()
+                .w(px(14.))
+                .flex_none()
+                .text_color(rgb(ui().text))
+                .child(if on { "✓" } else { "" })
+        };
 
         let mut menu = div()
             .id("host-menu")
@@ -332,7 +363,11 @@ impl Workspace {
         for session in &self.sessions {
             let is_current = Some(&session.session_id) == current_session.as_ref();
             let session_id = session.session_id.clone();
-            let label = if session.label.is_empty() { session.session_id.clone() } else { session.label.clone() };
+            let label = if session.label.is_empty() {
+                session.session_id.clone()
+            } else {
+                session.label.clone()
+            };
             menu = menu.child(
                 item(SharedString::from(format!("menu-{}", session.session_id)))
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -363,7 +398,12 @@ impl Workspace {
                     .on_click(cx.listener(|this, _, window, cx| this.open_rename(window, cx)))
                     .child(check(false))
                     .child(div().flex_1().child("Rename Session…"))
-                    .child(div().text_xs().text_color(rgb(ui().text_faint)).child("Ctrl+Shift+R")),
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(ui().text_faint))
+                            .child("Ctrl+Shift+R"),
+                    ),
             )
             .child(div().h(px(1.)).mx_2().my_1().bg(rgb(ui().card_border)))
             .child(heading("Hosts".into()))
@@ -380,7 +420,12 @@ impl Workspace {
                     .child(check(self.current_host.is_none()))
                     .child(icon("icons/server.svg", 14., ui().text_dim))
                     .child(div().flex_1().child(Endpoint::local().host_name()))
-                    .child(div().text_xs().text_color(rgb(ui().text_faint)).child("this machine")),
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(ui().text_faint))
+                            .child("this machine"),
+                    ),
             );
 
         for host in &self.hosts {
@@ -414,7 +459,9 @@ impl Workspace {
                         div()
                             .id(SharedString::from(format!("remove-{}", host.id)))
                             .invisible()
-                            .group_hover(SharedString::from(format!("menu-{}", host.id)), |d| d.visible())
+                            .group_hover(SharedString::from(format!("menu-{}", host.id)), |d| {
+                                d.visible()
+                            })
                             .px_1()
                             .rounded(px(4.))
                             .text_color(rgb(ui().text_faint))
@@ -437,7 +484,14 @@ impl Workspace {
                 .child("Add Remote Host…"),
         );
         if let Some(notice) = &self.notice {
-            menu = menu.child(div().px_2().py_2().text_xs().text_color(rgb(ui().text_dim)).child(notice.clone()));
+            menu = menu.child(
+                div()
+                    .px_2()
+                    .py_2()
+                    .text_xs()
+                    .text_color(rgb(ui().text_dim))
+                    .child(notice.clone()),
+            );
         }
 
         // A backdrop that closes the menu when clicked outside it.
@@ -457,7 +511,11 @@ impl Workspace {
             .child(menu)
     }
 
-    pub(super) fn render_add_host(&self, dialog: &AddHostDialog, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_add_host(
+        &self,
+        dialog: &AddHostDialog,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let field = |label: &'static str, input: Entity<TextField>| {
             div()
                 .flex()
@@ -476,9 +534,13 @@ impl Workspace {
                 .cursor_pointer()
                 .map(|d| {
                     if primary {
-                        d.bg(rgb(ui().accent)).text_color(rgb(0xffffff)).hover(|d| d.opacity(0.9))
+                        d.bg(rgb(ui().accent))
+                            .text_color(rgb(0xffffff))
+                            .hover(|d| d.opacity(0.9))
                     } else {
-                        d.bg(rgb(ui().tab_active)).text_color(rgb(ui().text)).hover(|d| d.bg(rgb(ui().tab_active_border)))
+                        d.bg(rgb(ui().tab_active))
+                            .text_color(rgb(ui().text))
+                            .hover(|d| d.bg(rgb(ui().tab_active_border)))
                     }
                 })
                 .child(text)
@@ -507,7 +569,12 @@ impl Workspace {
                     .border_color(rgb(ui().tab_active_border))
                     .bg(rgb(ui().menu))
                     .shadow_lg()
-                    .child(div().text_base().font_weight(FontWeight::SEMIBOLD).child("Add Remote Host"))
+                    .child(
+                        div()
+                            .text_base()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("Add Remote Host"),
+                    )
                     .child(div().text_xs().text_color(rgb(ui().text_dim)).child(
                         "A Rex server with a network listener, such as a VM on your tailnet. \
                          The host is saved to the same list as `rex hosts`.",
@@ -522,13 +589,25 @@ impl Workspace {
                             .flex()
                             .justify_end()
                             .gap_2()
-                            .child(button("add-host-cancel", "Cancel", false).on_click(cx.listener(|this, _, _, cx| {
-                                this.add_host = None;
-                                cx.notify();
-                            })))
+                            .child(button("add-host-cancel", "Cancel", false).on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    this.add_host = None;
+                                    cx.notify();
+                                }),
+                            ))
                             .child(
-                                button("add-host-submit", if dialog.busy { "Connecting…" } else { "Add & Connect" }, true)
-                                    .on_click(cx.listener(|this, _, window, cx| this.submit_add_host(window, cx))),
+                                button(
+                                    "add-host-submit",
+                                    if dialog.busy {
+                                        "Connecting…"
+                                    } else {
+                                        "Add & Connect"
+                                    },
+                                    true,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| this.submit_add_host(window, cx),
+                                )),
                             ),
                     ),
             )

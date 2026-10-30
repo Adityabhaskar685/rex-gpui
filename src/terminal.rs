@@ -10,14 +10,15 @@ use crate::ghostty::{self, CursorShape, RenderState, Rgb, Scroll, ViewportPoint,
 use gpui::{
     App, Bounds, ClipboardItem, Context, FocusHandle, Focusable, Font, FontWeight, Hsla,
     KeyDownEvent, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    Point, ScrollDelta, ScrollWheelEvent, SharedString, Task, TextRun, Window, canvas, div, fill, font, outline, point, prelude::*, px, size,
+    Point, ScrollDelta, ScrollWheelEvent, SharedString, Task, TextRun, Window, canvas, div, fill,
+    font, outline, point, prelude::*, px, size,
 };
 use serde_json::{Value, json};
 
 use crate::keys;
-use crate::theme::ui;
 use crate::mirror::{self, Mirror, MirrorEvent, SharedTerm};
 use crate::rex::control::Control;
+use crate::theme::ui;
 /// Width kept free at the right of the grid for the scrollbar.
 const SCROLLBAR_WIDTH: f32 = 10.;
 
@@ -108,7 +109,12 @@ struct CellMetrics {
 }
 
 impl TerminalPane {
-    pub fn new(control: Control, session_id: String, block_id: String, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        control: Control,
+        session_id: String,
+        block_id: String,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let mirror = mirror::start(control.clone(), session_id.clone(), block_id.clone());
         let events = cx.spawn({
             let control = control.clone();
@@ -116,8 +122,18 @@ impl TerminalPane {
             let (rx, dirty) = (mirror.events.clone(), mirror.dirty.clone());
             async move |this, cx| {
                 let (title, process) = futures_util::join!(
-                    control.block_call("com.superlogical.terminal.title", &session_id, &block_id, json!({})),
-                    control.block_call("com.superlogical.terminal.process", &session_id, &block_id, json!({})),
+                    control.block_call(
+                        "com.superlogical.terminal.title",
+                        &session_id,
+                        &block_id,
+                        json!({})
+                    ),
+                    control.block_call(
+                        "com.superlogical.terminal.process",
+                        &session_id,
+                        &block_id,
+                        json!({})
+                    ),
                 );
                 let _ = this.update(cx, |this, cx| {
                     if let Ok(title) = title {
@@ -134,7 +150,9 @@ impl TerminalPane {
                         match event {
                             // Take the redraw before drawing, so a change made while drawing
                             // asks for another one.
-                            MirrorEvent::Redraw => dirty.store(false, std::sync::atomic::Ordering::Release),
+                            MirrorEvent::Redraw => {
+                                dirty.store(false, std::sync::atomic::Ordering::Release)
+                            }
                             MirrorEvent::Status(status) => this.status = status,
                             MirrorEvent::Theme(theme) => this.server_theme = Some(theme),
                             MirrorEvent::Exited(code) => this.exit_code = Some(code),
@@ -181,7 +199,9 @@ impl TerminalPane {
     /// A `block_event` from the server for this block, such as a new title.
     pub fn on_block_event(&mut self, name: &str, payload: &Value, cx: &mut Context<Self>) {
         match name {
-            "title_changed" => self.info.title = payload["title"].as_str().unwrap_or_default().into(),
+            "title_changed" => {
+                self.info.title = payload["title"].as_str().unwrap_or_default().into()
+            }
             "process_changed" => self.info.apply_process(payload),
             "pwd_changed" => {
                 let pwd = payload["pwd"].as_str().unwrap_or_default();
@@ -228,7 +248,11 @@ impl TerminalPane {
     fn confirm_paste(&mut self, as_one_line: bool, cx: &mut Context<Self>) {
         if let Some(text) = self.pending_paste.take() {
             let text = if as_one_line {
-                text.lines().map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" ")
+                text.lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" ")
             } else {
                 text
             };
@@ -276,7 +300,9 @@ impl TerminalPane {
             cx.stop_propagation();
             return;
         }
-        let Some(key) = keys::client_key(ks, event.is_held) else { return };
+        let Some(key) = keys::client_key(ks, event.is_held) else {
+            return;
+        };
         cx.stop_propagation();
         {
             let mut shared = self.term();
@@ -304,7 +330,12 @@ impl TerminalPane {
         );
     }
 
-    fn on_scroll(&mut self, event: &ScrollWheelEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    fn on_scroll(
+        &mut self,
+        event: &ScrollWheelEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(cell) = self.cell else { return };
         let to_program = {
             let shared = self.term();
@@ -353,12 +384,18 @@ impl TerminalPane {
         let row = ((position.y - origin.y) / cell.height).floor().max(0.0) as usize;
         let shared = self.term();
         let (cols, rows) = (shared.term.cols() as usize, shared.term.rows() as usize);
-        Some((col.min(cols.saturating_sub(1)), row.min(rows.saturating_sub(1))))
+        Some((
+            col.min(cols.saturating_sub(1)),
+            row.min(rows.saturating_sub(1)),
+        ))
     }
 
     fn viewport_point(&self, position: Point<Pixels>) -> Option<ViewportPoint> {
         let (x, y) = self.cell_at(position)?;
-        Some(ViewportPoint { x: x as u16, y: y as u16 })
+        Some(ViewportPoint {
+            x: x as u16,
+            y: y as u16,
+        })
     }
 
     /// Whether mouse events belong to the program. Shift keeps them local, for selecting.
@@ -366,15 +403,25 @@ impl TerminalPane {
         self.term().term.mouse_tracking() && !modifiers.shift
     }
 
-    fn send_mouse(&self, action: &str, button: Option<MouseButton>, held: Option<MouseButton>, position: Point<Pixels>, modifiers: &Modifiers) {
-        let Some((x, y)) = self.cell_at(position) else { return };
+    fn send_mouse(
+        &self,
+        action: &str,
+        button: Option<MouseButton>,
+        held: Option<MouseButton>,
+        position: Point<Pixels>,
+        modifiers: &Modifiers,
+    ) {
+        let Some((x, y)) = self.cell_at(position) else {
+            return;
+        };
         let name = |b: MouseButton| match b {
             MouseButton::Left => "left",
             MouseButton::Right => "right",
             MouseButton::Middle => "middle",
             _ => "unknown",
         };
-        let mut payload = json!({"action": action, "x": x, "y": y, "mods": keys::mods_string(modifiers)});
+        let mut payload =
+            json!({"action": action, "x": x, "y": y, "mods": keys::mods_string(modifiers)});
         if let Some(button) = button {
             payload["button"] = json!(name(button));
         }
@@ -384,10 +431,21 @@ impl TerminalPane {
         self.send_event("mouse", payload);
     }
 
-    fn on_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         window.focus(&self.focus_handle);
         if self.program_wants_mouse(&event.modifiers) {
-            self.send_mouse("press", Some(event.button), Some(event.button), event.position, &event.modifiers);
+            self.send_mouse(
+                "press",
+                Some(event.button),
+                Some(event.button),
+                event.position,
+                &event.modifiers,
+            );
             return;
         }
         if event.button == MouseButton::Middle {
@@ -399,7 +457,9 @@ impl TerminalPane {
         if event.button != MouseButton::Left {
             return;
         }
-        let Some(point) = self.viewport_point(event.position) else { return };
+        let Some(point) = self.viewport_point(event.position) else {
+            return;
+        };
         match event.click_count {
             1 => {
                 // A plain click clears the selection; dragging from here selects.
@@ -420,25 +480,40 @@ impl TerminalPane {
 
     /// Scroll so the thumb's top follows `y`, measured from the top of the track.
     fn scroll_to_thumb(&mut self, top: f32, cx: &mut Context<Self>) {
-        let Some(track) = self.track_height else { return };
+        let Some(track) = self.track_height else {
+            return;
+        };
         let mut shared = self.term();
         let bar = shared.term.scrollbar();
         // The thumb's top marks the first visible row.
         let max = bar.total.saturating_sub(bar.len) as f32;
-        let row = (top / f32::from(track) * bar.total as f32).clamp(0.0, max).round() as u64;
+        let row = (top / f32::from(track) * bar.total as f32)
+            .clamp(0.0, max)
+            .round() as u64;
         if row != bar.offset {
             shared.term.scroll(Scroll::Row(row as usize));
             cx.notify();
         }
     }
 
-    fn on_scrollbar_down(&mut self, event: &MouseDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    fn on_scrollbar_down(
+        &mut self,
+        event: &MouseDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         cx.stop_propagation();
-        let (Some(origin), Some(track)) = (self.origin, self.track_height) else { return };
+        let (Some(origin), Some(track)) = (self.origin, self.track_height) else {
+            return;
+        };
         let (thumb_top, thumb_height) = self.thumb(track);
         let y = f32::from(event.position.y - origin.y);
         // Grabbing the thumb keeps its offset under the pointer; clicking the track centers it.
-        let grab = if (thumb_top..thumb_top + thumb_height).contains(&y) { y - thumb_top } else { thumb_height / 2. };
+        let grab = if (thumb_top..thumb_top + thumb_height).contains(&y) {
+            y - thumb_top
+        } else {
+            thumb_height / 2.
+        };
         self.scroll_drag = Some(px(grab));
         self.scroll_to_thumb(y - grab, cx);
     }
@@ -448,7 +523,10 @@ impl TerminalPane {
         let bar = self.term().term.scrollbar();
         let total = bar.total.max(1) as f32;
         let track = f32::from(track);
-        (track * bar.offset as f32 / total, track * bar.len as f32 / total)
+        (
+            track * bar.offset as f32 / total,
+            track * bar.len as f32 / total,
+        )
     }
 
     /// End a drag-selection, keeping what it selected as the primary selection.
@@ -462,7 +540,12 @@ impl TerminalPane {
         cx.notify();
     }
 
-    fn on_mouse_move(&mut self, event: &MouseMoveEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    fn on_mouse_move(
+        &mut self,
+        event: &MouseMoveEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let (Some(grab), Some(origin)) = (self.scroll_drag, self.origin) {
             if event.pressed_button == Some(MouseButton::Left) {
                 self.scroll_to_thumb(f32::from(event.position.y - origin.y - grab), cx);
@@ -486,9 +569,16 @@ impl TerminalPane {
             return;
         }
         // Report drags; plain motion only matters to programs in any-motion mode.
-        let wants_motion = event.pressed_button.is_some() || self.term().term.dec_mode(ANY_MOTION_MOUSE);
+        let wants_motion =
+            event.pressed_button.is_some() || self.term().term.dec_mode(ANY_MOTION_MOUSE);
         if wants_motion && self.program_wants_mouse(&event.modifiers) {
-            self.send_mouse("motion", None, event.pressed_button, event.position, &event.modifiers);
+            self.send_mouse(
+                "motion",
+                None,
+                event.pressed_button,
+                event.position,
+                &event.modifiers,
+            );
         }
     }
 
@@ -501,7 +591,13 @@ impl TerminalPane {
             return;
         }
         if self.program_wants_mouse(&event.modifiers) {
-            self.send_mouse("release", Some(event.button), None, event.position, &event.modifiers);
+            self.send_mouse(
+                "release",
+                Some(event.button),
+                None,
+                event.position,
+                &event.modifiers,
+            );
         }
     }
 
@@ -532,7 +628,10 @@ impl TerminalPane {
     }
 
     pub fn status(&self) -> Option<String> {
-        self.status.clone().or_else(|| self.exit_code.map(|code| format!("Process exited with code {code}")))
+        self.status.clone().or_else(|| {
+            self.exit_code
+                .map(|code| format!("Process exited with code {code}"))
+        })
     }
 }
 
@@ -557,11 +656,17 @@ pub fn terminal_font() -> Font {
 
 /// Lines per wheel notch: `REX_SCROLL_LINES`, else 3.
 fn scroll_multiplier() -> f32 {
-    std::env::var("REX_SCROLL_LINES").ok().and_then(|s| s.parse().ok()).unwrap_or(3.)
+    std::env::var("REX_SCROLL_LINES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(3.)
 }
 
 pub fn font_size() -> Pixels {
-    px(std::env::var("REX_FONT_SIZE").ok().and_then(|s| s.parse().ok()).unwrap_or(14.0))
+    px(std::env::var("REX_FONT_SIZE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(14.0))
 }
 
 impl Render for TerminalPane {
@@ -572,7 +677,10 @@ impl Render for TerminalPane {
         let cell = {
             let text = window.text_system();
             let id = text.resolve_font(&font);
-            let width = text.advance(id, font_size, 'm').map(|s| s.width).unwrap_or(font_size * 0.6);
+            let width = text
+                .advance(id, font_size, 'm')
+                .map(|s| s.width)
+                .unwrap_or(font_size * 0.6);
             let height = (font_size * 1.25).round();
             CellMetrics { width, height }
         };
@@ -586,7 +694,12 @@ impl Render for TerminalPane {
             // A new terminal, or new colors, needs the default colors set again.
             let key = (shared.generation, theme.key.clone());
             if self.applied_theme.as_ref() != Some(&key) {
-                shared.term.set_default_colors(theme.foreground, theme.background, theme.cursor, &theme.palette);
+                shared.term.set_default_colors(
+                    theme.foreground,
+                    theme.background,
+                    theme.cursor,
+                    &theme.palette,
+                );
                 // Cached rows hold colors resolved with the old defaults.
                 self.render_state.invalidate();
                 self.applied_theme = Some(key);
@@ -599,7 +712,10 @@ impl Render for TerminalPane {
         let status = self.status();
         let entity = cx.entity();
         let scrollbar = self.render_scrollbar(cx);
-        let paste_prompt = self.pending_paste.as_ref().map(|text| self.render_paste_prompt(text, cx));
+        let paste_prompt = self
+            .pending_paste
+            .as_ref()
+            .map(|text| self.render_paste_prompt(text, cx));
 
         div()
             .id(SharedString::from(self.block_id.clone()))
@@ -615,12 +731,15 @@ impl Render for TerminalPane {
             .on_mouse_up(MouseButton::Middle, cx.listener(Self::on_mouse_up))
             .on_mouse_up(MouseButton::Right, cx.listener(Self::on_mouse_up))
             // A drag that ends outside the pane still has to end.
-            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                this.scroll_drag = None;
-                if this.select_anchor.is_some() {
-                    this.finish_selection(cx);
-                }
-            }))
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.scroll_drag = None;
+                    if this.select_anchor.is_some() {
+                        this.finish_selection(cx);
+                    }
+                }),
+            )
             .size_full()
             .relative()
             .overflow_hidden()
@@ -630,7 +749,9 @@ impl Render for TerminalPane {
                     move |bounds, _window, cx| {
                         entity.update(cx, |this, _| this.request_size(bounds, cell));
                     },
-                    move |bounds, (), window, cx| frame.paint(bounds, cell, font, font_size, window, cx),
+                    move |bounds, (), window, cx| {
+                        frame.paint(bounds, cell, font, font_size, window, cx)
+                    },
                 )
                 .size_full(),
             )
@@ -658,7 +779,11 @@ impl TerminalPane {
         let (has_history, alternate, at_bottom) = {
             let shared = self.term();
             let bar = shared.term.scrollbar();
-            (bar.total > bar.len, shared.term.alternate_screen(), shared.term.at_bottom())
+            (
+                bar.total > bar.len,
+                shared.term.alternate_screen(),
+                shared.term.at_bottom(),
+            )
         };
         if !has_history || alternate {
             return None;
@@ -670,7 +795,10 @@ impl TerminalPane {
         let group = SharedString::from(format!("scrollbar-{}", self.block_id));
         Some(
             div()
-                .id(SharedString::from(format!("scrollbar-track-{}", self.block_id)))
+                .id(SharedString::from(format!(
+                    "scrollbar-track-{}",
+                    self.block_id
+                )))
                 .group(group.clone())
                 .absolute()
                 .top_0()
@@ -687,8 +815,14 @@ impl TerminalPane {
                         .w(px(6.))
                         .h(px(height))
                         .rounded_full()
-                        .bg(Hsla::from(gpui::rgb(ui().text_dim)).opacity(if active { 0.55 } else { 0.3 }))
-                        .group_hover(group, |d| d.bg(Hsla::from(gpui::rgb(ui().text_dim)).opacity(0.7))),
+                        .bg(Hsla::from(gpui::rgb(ui().text_dim)).opacity(if active {
+                            0.55
+                        } else {
+                            0.3
+                        }))
+                        .group_hover(group, |d| {
+                            d.bg(Hsla::from(gpui::rgb(ui().text_dim)).opacity(0.7))
+                        }),
                 ),
         )
     }
@@ -705,9 +839,12 @@ impl TerminalPane {
                 .cursor_pointer()
                 .map(|d| {
                     if primary {
-                        d.bg(gpui::rgb(ui().accent)).text_color(gpui::white()).hover(|d| d.opacity(0.9))
+                        d.bg(gpui::rgb(ui().accent))
+                            .text_color(gpui::white())
+                            .hover(|d| d.opacity(0.9))
                     } else {
-                        d.bg(gpui::rgb(ui().tab_active)).hover(|d| d.bg(gpui::rgb(ui().tab_active_border)))
+                        d.bg(gpui::rgb(ui().tab_active))
+                            .hover(|d| d.bg(gpui::rgb(ui().tab_active_border)))
                     }
                 })
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -844,17 +981,34 @@ impl Frame {
                     {
                         seg.text.push_str(&cell.text)
                     }
-                    _ => segments.push(Segment { row, col, width, text: cell.text.clone(), style, single }),
+                    _ => segments.push(Segment {
+                        row,
+                        col,
+                        width,
+                        text: cell.text.clone(),
+                        style,
+                        single,
+                    }),
                 }
             }
         }
 
         let cursor = frame.cursor.as_ref().map(|c| {
-            let color = to_hsla(frame.cursor_color.or(theme.cursor).unwrap_or(frame.foreground));
+            let color = to_hsla(
+                frame
+                    .cursor_color
+                    .or(theme.cursor)
+                    .unwrap_or(frame.foreground),
+            );
             (c.y as usize, c.x as usize, c.shape, color, focused)
         });
 
-        Self { background: default_bg, segments, backgrounds, cursor }
+        Self {
+            background: default_bg,
+            segments,
+            backgrounds,
+            cursor,
+        }
     }
 
     fn paint(
@@ -868,7 +1022,10 @@ impl Frame {
     ) {
         let origin = bounds.origin;
         let at = |row: usize, col: usize| {
-            point(origin.x + cell.width * col as f32, origin.y + cell.height * row as f32)
+            point(
+                origin.x + cell.width * col as f32,
+                origin.y + cell.height * row as f32,
+            )
         };
 
         for (row, cols, color) in &self.backgrounds {
@@ -879,14 +1036,26 @@ impl Frame {
         if let Some((row, col, shape, color, focused)) = self.cursor {
             let origin = at(row, col);
             let quad = match (shape, focused) {
-                (CursorShape::Bar, _) => fill(Bounds::new(origin, size(px(2.), cell.height)), color),
+                (CursorShape::Bar, _) => {
+                    fill(Bounds::new(origin, size(px(2.), cell.height)), color)
+                }
                 (CursorShape::Underline, _) => fill(
-                    Bounds::new(point(origin.x, origin.y + cell.height - px(2.)), size(cell.width, px(2.))),
+                    Bounds::new(
+                        point(origin.x, origin.y + cell.height - px(2.)),
+                        size(cell.width, px(2.)),
+                    ),
                     color,
                 ),
-                (CursorShape::Block, true) => fill(Bounds::new(origin, size(cell.width, cell.height)), color.opacity(0.7)),
+                (CursorShape::Block, true) => fill(
+                    Bounds::new(origin, size(cell.width, cell.height)),
+                    color.opacity(0.7),
+                ),
                 // An unfocused pane, or a program asking for it, gets a hollow block.
-                _ => outline(Bounds::new(origin, size(cell.width, cell.height)), color, gpui::BorderStyle::Solid),
+                _ => outline(
+                    Bounds::new(origin, size(cell.width, cell.height)),
+                    color,
+                    gpui::BorderStyle::Solid,
+                ),
             };
             window.paint_quad(quad);
         }
@@ -970,7 +1139,9 @@ impl Theme {
             theme.cursor = Some(c);
         }
         for entry in msg["palette"].as_array().into_iter().flatten() {
-            let Some((index, color)) = entry.as_str().and_then(|e| e.split_once('=')) else { continue };
+            let Some((index, color)) = entry.as_str().and_then(|e| e.split_once('=')) else {
+                continue;
+            };
             if let (Ok(index), Some(color)) = (index.parse::<usize>(), parse_hex(color)) {
                 if index < 256 {
                     theme.palette[index] = color;
@@ -988,11 +1159,19 @@ fn rgb(hex: u32) -> Rgb {
 
 fn parse_hex(s: &str) -> Option<Rgb> {
     let s = s.strip_prefix('#').unwrap_or(s);
-    (s.len() == 6).then(|| u32::from_str_radix(s, 16).ok().map(rgb)).flatten()
+    (s.len() == 6)
+        .then(|| u32::from_str_radix(s, 16).ok().map(rgb))
+        .flatten()
 }
 
 fn to_hsla((r, g, b): Rgb) -> Hsla {
-    gpui::Rgba { r: r as f32 / 255., g: g as f32 / 255., b: b as f32 / 255., a: 1. }.into()
+    gpui::Rgba {
+        r: r as f32 / 255.,
+        g: g as f32 / 255.,
+        b: b as f32 / 255.,
+        a: 1.,
+    }
+    .into()
 }
 
 /// The 256-color palette: the theme's 16 colors, then the standard cube and gray ramp.
@@ -1026,7 +1205,10 @@ mod tests {
         let chunks = 800; // about 50 MB
         let mut splitter = StreamSplitter::new(7);
         let mut items = Vec::new();
-        splitter.feed(b"\x1b_rex1;7;{\"type\":\"resize\",\"cols\":120,\"rows\":40}\x1b\\", &mut items);
+        splitter.feed(
+            b"\x1b_rex1;7;{\"type\":\"resize\",\"cols\":120,\"rows\":40}\x1b\\",
+            &mut items,
+        );
 
         let start = std::time::Instant::now();
         for _ in 0..chunks {
@@ -1042,6 +1224,10 @@ mod tests {
         }
         let parse = start.elapsed();
         let mb = (chunk.len() * chunks) as f64 / 1e6;
-        println!("splitter: {:.0} MB/s, terminal parser: {:.0} MB/s", mb / split.as_secs_f64(), mb / parse.as_secs_f64());
+        println!(
+            "splitter: {:.0} MB/s, terminal parser: {:.0} MB/s",
+            mb / split.as_secs_f64(),
+            mb / parse.as_secs_f64()
+        );
     }
 }

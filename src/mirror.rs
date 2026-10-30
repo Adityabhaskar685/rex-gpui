@@ -58,11 +58,26 @@ const FORMAT_CHUNK: u64 = 900_000;
 
 pub fn start(control: Control, session_id: String, block_id: String) -> Mirror {
     let term = Terminal::new(80, 24).expect("creating a terminal");
-    let term: SharedTerm = Arc::new(Mutex::new(Shared { term, generation: 0 }));
+    let term: SharedTerm = Arc::new(Mutex::new(Shared {
+        term,
+        generation: 0,
+    }));
     let (tx, events) = async_channel::unbounded();
     let dirty = Arc::new(AtomicBool::new(false));
-    let task = crate::runtime().spawn(run(control, session_id, block_id, term.clone(), tx, dirty.clone()));
-    Mirror { term, events, dirty, task }
+    let task = crate::runtime().spawn(run(
+        control,
+        session_id,
+        block_id,
+        term.clone(),
+        tx,
+        dirty.clone(),
+    ));
+    Mirror {
+        term,
+        events,
+        dirty,
+        task,
+    }
 }
 
 struct Pipe {
@@ -96,14 +111,23 @@ async fn run(
     tx: async_channel::Sender<MirrorEvent>,
     dirty: Arc<AtomicBool>,
 ) {
-    let pipe = Pipe { control, session_id, block_id, term, tx, dirty };
+    let pipe = Pipe {
+        control,
+        session_id,
+        block_id,
+        term,
+        tx,
+        dirty,
+    };
     let mut delay = Duration::from_millis(500);
     loop {
         match stream_once(&pipe).await {
             // The block closed, or the pane went away.
             Ok(Ended::Done) => return,
             Ok(Ended::Lost(reason)) | Err(reason) => {
-                if !pipe.send(MirrorEvent::Status(Some(format!("Reconnecting… ({reason:#})")))) {
+                if !pipe.send(MirrorEvent::Status(Some(format!(
+                    "Reconnecting… ({reason:#})"
+                )))) {
                     return;
                 }
                 tokio::time::sleep(delay).await;
@@ -123,7 +147,8 @@ async fn stream_once(pipe: &Pipe) -> Result<Ended, anyhow::Error> {
     if !pipe.send(MirrorEvent::Status(Some("Connecting…".into()))) {
         return Ok(Ended::Done);
     }
-    let (rx, _guard) = data::open_terminal_stream(&pipe.control, &pipe.session_id, &pipe.block_id).await?;
+    let (rx, _guard) =
+        data::open_terminal_stream(&pipe.control, &pipe.session_id, &pipe.block_id).await?;
     let mut splitter = None;
     let mut live = false;
     let mut announced = false;
@@ -138,7 +163,9 @@ async fn stream_once(pipe: &Pipe) -> Result<Ended, anyhow::Error> {
             }
             DataMessage::Closed(Some(reason)) => return Ok(Ended::Lost(anyhow::anyhow!(reason))),
             DataMessage::Bytes(bytes) => {
-                let Some(splitter) = splitter.as_mut() else { continue };
+                let Some(splitter) = splitter.as_mut() else {
+                    continue;
+                };
                 items.clear();
                 splitter.feed(&bytes, &mut items);
                 let mut redraw_from_vt = false;
@@ -146,19 +173,24 @@ async fn stream_once(pipe: &Pipe) -> Result<Ended, anyhow::Error> {
                     let mut shared = pipe.term.lock().unwrap();
                     for item in items.drain(..) {
                         match item {
-                            StreamItem::Snapshot(snapshot) => match Terminal::from_snapshot(&snapshot) {
-                                Ok(term) => {
-                                    shared.term = term;
-                                    shared.generation += 1;
-                                    live = true;
+                            StreamItem::Snapshot(snapshot) => {
+                                match Terminal::from_snapshot(&snapshot) {
+                                    Ok(term) => {
+                                        shared.term = term;
+                                        shared.generation += 1;
+                                        live = true;
+                                    }
+                                    Err(err) => {
+                                        // A snapshot format this library doesn't know, say after a
+                                        // Rex update: read the screen as VT text instead.
+                                        log::warn!(
+                                            "restoring {} from its snapshot: {err:#}",
+                                            pipe.block_id
+                                        );
+                                        redraw_from_vt = true;
+                                    }
                                 }
-                                Err(err) => {
-                                    // A snapshot format this library doesn't know, say after a
-                                    // Rex update: read the screen as VT text instead.
-                                    log::warn!("restoring {} from its snapshot: {err:#}", pipe.block_id);
-                                    redraw_from_vt = true;
-                                }
-                            },
+                            }
                             StreamItem::Output(bytes) if live => shared.term.write(&bytes),
                             // Before a redraw, output is already part of the screen it reads.
                             StreamItem::Output(_) => {}
@@ -174,7 +206,9 @@ async fn stream_once(pipe: &Pipe) -> Result<Ended, anyhow::Error> {
                                     pipe.send(MirrorEvent::Theme(msg));
                                 }
                                 Some("child_exited") => {
-                                    pipe.send(MirrorEvent::Exited(msg["exit_code"].as_i64().unwrap_or(-1)));
+                                    pipe.send(MirrorEvent::Exited(
+                                        msg["exit_code"].as_i64().unwrap_or(-1),
+                                    ));
                                 }
                                 _ => {}
                             },
@@ -215,13 +249,28 @@ async fn stream_once(pipe: &Pipe) -> Result<Ended, anyhow::Error> {
 pub async fn fetch_vt(control: &Control, session_id: &str, block_id: &str) -> Result<String> {
     let mut args = json!({"format": "vt", "max_bytes": FORMAT_CHUNK});
     for extra in [
-        "charsets", "cursor", "hyperlink", "keyboard", "kitty_keyboard", "modes", "palette",
-        "protection", "pwd", "scrolling_region", "style", "tabstops",
+        "charsets",
+        "cursor",
+        "hyperlink",
+        "keyboard",
+        "kitty_keyboard",
+        "modes",
+        "palette",
+        "protection",
+        "pwd",
+        "scrolling_region",
+        "style",
+        "tabstops",
     ] {
         args[format!("extra_{extra}")] = json!(true);
     }
     let reply = control
-        .block_call("com.superlogical.terminal.format", session_id, block_id, args)
+        .block_call(
+            "com.superlogical.terminal.format",
+            session_id,
+            block_id,
+            args,
+        )
         .await?;
     let mut content = reply["content"].as_str().unwrap_or_default().to_string();
     if let Some(id) = reply["id"].as_u64() {

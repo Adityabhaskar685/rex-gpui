@@ -15,7 +15,9 @@ const SUBPROTOCOL: &str = "rex.data.terminal.v1";
 
 pub enum DataMessage {
     /// The channel nonce from the WELCOME, which marks Rex's own messages in the stream.
-    Welcome { nonce: u64 },
+    Welcome {
+        nonce: u64,
+    },
     Bytes(Vec<u8>),
     /// The stream ended. `None` means it closed normally, such as when the block closed.
     Closed(Option<String>),
@@ -80,7 +82,11 @@ async fn pump(
     ws.send(Message::binary(hello)).await?;
 
     let welcome = loop {
-        match ws.next().await.ok_or_else(|| anyhow!("closed during handshake"))?? {
+        match ws
+            .next()
+            .await
+            .ok_or_else(|| anyhow!("closed during handshake"))??
+        {
             Message::Binary(bytes) => break bytes,
             Message::Close(frame) => bail!("closed during handshake: {frame:?}"),
             _ => continue,
@@ -88,7 +94,10 @@ async fn pump(
     };
     match welcome.first() {
         Some(0x81) if welcome.len() == 32 => {}
-        Some(0x82) => bail!("data handshake rejected, reason {:#04x}", welcome.get(1).unwrap_or(&0)),
+        Some(0x82) => bail!(
+            "data handshake rejected, reason {:#04x}",
+            welcome.get(1).unwrap_or(&0)
+        ),
         _ => bail!("malformed data WELCOME"),
     }
     let nonce = u64::from_le_bytes(welcome[24..32].try_into()?);
@@ -107,8 +116,14 @@ async fn pump(
         match msg? {
             Message::Binary(bytes) => tx.send(DataMessage::Bytes(bytes.to_vec())).await?,
             Message::Close(frame) => {
-                if let Some(frame) = frame.filter(|f| u16::from(f.code) != 1000 && u16::from(f.code) != 4000) {
-                    bail!("data stream closed: {} {}", u16::from(frame.code), frame.reason);
+                if let Some(frame) =
+                    frame.filter(|f| u16::from(f.code) != 1000 && u16::from(f.code) != 4000)
+                {
+                    bail!(
+                        "data stream closed: {} {}",
+                        u16::from(frame.code),
+                        frame.reason
+                    );
                 }
                 break;
             }
@@ -130,10 +145,15 @@ pub enum StreamItem {
 
 enum State {
     /// Inside the binary snapshot, collecting it until the first Rex message.
-    Snapshot { snapshot: Vec<u8> },
+    Snapshot {
+        snapshot: Vec<u8>,
+    },
     Normal,
     Esc,
-    Apc { buf: Vec<u8>, esc: bool },
+    Apc {
+        buf: Vec<u8>,
+        esc: bool,
+    },
 }
 
 /// Splits a terminal stream into program output and Rex messages. The stream starts with a
@@ -149,7 +169,9 @@ impl StreamSplitter {
     pub fn new(nonce: u64) -> Self {
         Self {
             prefix: format!("rex1;{nonce};").into_bytes(),
-            state: State::Snapshot { snapshot: Vec::new() },
+            state: State::Snapshot {
+                snapshot: Vec::new(),
+            },
         }
     }
 
@@ -185,7 +207,10 @@ impl StreamSplitter {
                 }
                 State::Esc => {
                     if b == b'_' {
-                        self.state = State::Apc { buf: Vec::new(), esc: false };
+                        self.state = State::Apc {
+                            buf: Vec::new(),
+                            esc: false,
+                        };
                     } else {
                         output.push(0x1b);
                         if b == 0x1b {

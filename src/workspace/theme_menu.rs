@@ -29,20 +29,28 @@ impl Workspace {
         let subscriptions = vec![
             // Redraw the list as the search changes.
             cx.observe(&search, |_, _, cx| cx.notify()),
-            cx.subscribe_in(&search, window, |this, _, event: &TextFieldEvent, window, cx| match event {
-                TextFieldEvent::Submit => {
-                    if let Some(first) = this.matching_themes(cx).first().cloned() {
-                        this.apply_theme(&first.name, window, cx);
+            cx.subscribe_in(
+                &search,
+                window,
+                |this, _, event: &TextFieldEvent, window, cx| match event {
+                    TextFieldEvent::Submit => {
+                        if let Some(first) = this.matching_themes(cx).first().cloned() {
+                            this.apply_theme(&first.name, window, cx);
+                        }
                     }
-                }
-                TextFieldEvent::Cancel => {
-                    this.theme_menu = None;
-                    cx.notify();
-                }
-            }),
+                    TextFieldEvent::Cancel => {
+                        this.theme_menu = None;
+                        cx.notify();
+                    }
+                },
+            ),
         ];
         window.focus(&search.focus_handle(cx));
-        self.theme_menu = Some(ThemeMenu { search, notice: None, _subscriptions: subscriptions });
+        self.theme_menu = Some(ThemeMenu {
+            search,
+            notice: None,
+            _subscriptions: subscriptions,
+        });
         self.host_menu = false;
         cx.notify();
     }
@@ -79,13 +87,19 @@ impl Workspace {
             prompt: Some("Import".into()),
         });
         cx.spawn(async move |this, cx| {
-            let Ok(Ok(Some(paths))) = chosen.await else { return };
+            let Ok(Ok(Some(paths))) = chosen.await else {
+                return;
+            };
             let result = theme::import(&paths);
             let _ = this.update(cx, |this, cx| {
                 let notice = match &result {
                     Ok(name) => {
                         theme::select(name);
-                        format!("Imported {} theme{}; now using {name}.", paths.len(), if paths.len() == 1 { "" } else { "s" })
+                        format!(
+                            "Imported {} theme{}; now using {name}.",
+                            paths.len(),
+                            if paths.len() == 1 { "" } else { "s" }
+                        )
                     }
                     Err(err) => format!("{err:#}"),
                 };
@@ -100,7 +114,11 @@ impl Workspace {
         .detach();
     }
 
-    pub(super) fn render_theme_menu(&self, menu: &ThemeMenu, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_theme_menu(
+        &self,
+        menu: &ThemeMenu,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let themes = self.matching_themes(cx);
         let count = themes.len();
         let current = theme::current().name.clone();
@@ -126,7 +144,9 @@ impl Workspace {
                             .border_1()
                             .border_color(rgb(ui().card_border))
                             .bg(rgb(t.term.background))
-                            .children([1, 2, 3, 4, 5].map(|c| div().size(px(6.)).rounded_full().bg(rgb(t.term.ansi[c]))));
+                            .children([1, 2, 3, 4, 5].map(|c| {
+                                div().size(px(6.)).rounded_full().bg(rgb(t.term.ansi[c]))
+                            }));
                         div()
                             .id(SharedString::from(format!("theme-{name}")))
                             .flex()
@@ -138,11 +158,28 @@ impl Workspace {
                             .cursor_pointer()
                             .text_color(rgb(ui().text))
                             .hover(|d| d.bg(rgb(ui().hover)))
-                            .on_click(cx.listener(move |this, _, window, cx| this.apply_theme(&name, window, cx)))
-                            .child(div().w(px(14.)).flex_none().child(if is_current { "✓" } else { "" }))
-                            .child(div().flex_1().min_w(px(0.)).truncate().child(t.name.to_string()))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.apply_theme(&name, window, cx)
+                            }))
+                            .child(div().w(px(14.)).flex_none().child(if is_current {
+                                "✓"
+                            } else {
+                                ""
+                            }))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .truncate()
+                                    .child(t.name.to_string()),
+                            )
                             .when(matches!(t.source, Source::File(_)), |d| {
-                                d.child(div().text_xs().text_color(rgb(ui().text_faint)).child("Ghostty"))
+                                d.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(ui().text_faint))
+                                        .child("Ghostty"),
+                                )
                             })
                             .child(swatch)
                     })
@@ -174,7 +211,10 @@ impl Workspace {
                     .px_2()
                     .text_xs()
                     .text_color(rgb(ui().text_faint))
-                    .child(format!("{count} theme{}", if count == 1 { "" } else { "s" })),
+                    .child(format!(
+                        "{count} theme{}",
+                        if count == 1 { "" } else { "s" }
+                    )),
             )
             .child(list)
             .child(div().h(px(1.)).mx_2().bg(rgb(ui().card_border)))
@@ -193,7 +233,14 @@ impl Workspace {
                     .child("Import Ghostty theme…"),
             )
             .when_some(menu.notice.clone(), |d, notice| {
-                d.child(div().px_2().pb_1().text_xs().text_color(rgb(ui().text_dim)).child(notice))
+                d.child(
+                    div()
+                        .px_2()
+                        .pb_1()
+                        .text_xs()
+                        .text_color(rgb(ui().text_dim))
+                        .child(notice),
+                )
             });
 
         div()

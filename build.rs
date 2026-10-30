@@ -30,7 +30,10 @@ fn main() {
         .cargo_metadata(false)
         .probe("libghostty-vt")
         .expect("libghostty-vt not found; build it from Ghostty's source (see README)");
-    let static_lib = library.link_paths.iter().find(|dir| dir.join("libghostty-vt.a").exists());
+    let static_lib = library
+        .link_paths
+        .iter()
+        .find(|dir| dir.join("libghostty-vt.a").exists());
     match static_lib {
         Some(dir) => {
             println!("cargo:rustc-link-search=native={}", dir.display());
@@ -56,7 +59,9 @@ fn main() {
     for dir in &library.include_paths {
         builder = builder.clang_arg(format!("-I{}", dir.display()));
     }
-    let bindings = builder.generate().expect("generating libghostty-vt bindings");
+    let bindings = builder
+        .generate()
+        .expect("generating libghostty-vt bindings");
     let out = PathBuf::from(env::var("OUT_DIR").unwrap()).join("ghostty_vt.rs");
     bindings.write_to_file(out).expect("writing bindings");
 }

@@ -24,7 +24,11 @@ impl EventEmitter<TextFieldEvent> for TextField {}
 
 impl TextField {
     pub fn new(placeholder: impl Into<SharedString>, cx: &mut Context<Self>) -> Self {
-        Self { text: String::new(), placeholder: placeholder.into(), focus_handle: cx.focus_handle() }
+        Self {
+            text: String::new(),
+            placeholder: placeholder.into(),
+            focus_handle: cx.focus_handle(),
+        }
     }
 
     pub fn with_text(mut self, text: impl Into<String>) -> Self {
@@ -71,24 +75,35 @@ impl Render for TextField {
         div()
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(Self::on_key_down))
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, _| {
-                window.focus(&this.focus_handle)
-            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, _| window.focus(&this.focus_handle)),
+            )
             .flex()
             .items_center()
             .h(px(32.))
             .px_2()
             .rounded(px(7.))
             .border_1()
-            .border_color(rgb(if focused { ui().accent } else { ui().tab_active_border }))
+            .border_color(rgb(if focused {
+                ui().accent
+            } else {
+                ui().tab_active_border
+            }))
             .bg(rgb(ui().window))
             .text_sm()
             .cursor_text()
             .child(
                 div()
                     .text_color(rgb(if empty { ui().text_faint } else { ui().text }))
-                    .child(if empty && !focused { self.placeholder.to_string() } else { self.text.clone() }),
+                    .child(if empty && !focused {
+                        self.placeholder.to_string()
+                    } else {
+                        self.text.clone()
+                    }),
             )
-            .when(focused, |d| d.child(div().w(px(1.5)).h(px(16.)).ml(px(1.)).bg(rgb(ui().text))))
+            .when(focused, |d| {
+                d.child(div().w(px(1.5)).h(px(16.)).ml(px(1.)).bg(rgb(ui().text)))
+            })
     }
 }

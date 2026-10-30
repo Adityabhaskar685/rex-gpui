@@ -6,9 +6,10 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 use gpui::{
-    AnyElement, AnyView, StyleRefinement, App, Bounds, Context, CursorStyle, Decorations, Entity, FocusHandle, Focusable,
-    FontWeight, HitboxBehavior, MouseButton, Pixels, Point, ResizeEdge, SharedString, Size,
-    Task, Window, actions, canvas, div, point, prelude::*, px, relative, rgb, svg,
+    AnyElement, AnyView, App, Bounds, Context, CursorStyle, Decorations, Entity, FocusHandle,
+    Focusable, FontWeight, HitboxBehavior, MouseButton, Pixels, Point, ResizeEdge, SharedString,
+    Size, StyleRefinement, Task, Window, actions, canvas, div, point, prelude::*, px, relative,
+    rgb, svg,
 };
 use serde_json::{Value, json};
 
@@ -132,10 +133,18 @@ impl Workspace {
     }
 
     /// Follow `self.control`'s events and attach to `target`, or the first session.
-    fn start(&mut self, events: async_channel::Receiver<Event>, target: Option<String>, cx: &mut Context<Self>) {
+    fn start(
+        &mut self,
+        events: async_channel::Receiver<Event>,
+        target: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         self._events = cx.spawn(async move |this, cx| {
             while let Ok(event) = events.recv().await {
-                if this.update(cx, |this, cx| this.on_event(event, cx)).is_err() {
+                if this
+                    .update(cx, |this, cx| this.on_event(event, cx))
+                    .is_err()
+                {
                     return;
                 }
             }
@@ -148,7 +157,9 @@ impl Workspace {
         let control = self.control.clone();
         cx.spawn(async move |this, cx| {
             let result = async {
-                control.call("session.attach_all", json!({"event_scope": "session"})).await?;
+                control
+                    .call("session.attach_all", json!({"event_scope": "session"}))
+                    .await?;
                 let sessions = list_sessions(&control).await?;
                 let session_id = match pick_session(&sessions, target.as_deref()) {
                     Some(id) => id,
@@ -178,12 +189,19 @@ impl Workspace {
         cx.spawn(async move |this, cx| {
             let result = async {
                 if let Some(previous) = previous.filter(|p| *p != session_id) {
-                    let _ = control.call("session.detach", json!({"session_id": previous})).await;
+                    let _ = control
+                        .call("session.detach", json!({"session_id": previous}))
+                        .await;
                 }
-                let reply = control.call("session.attach", json!({"session_id": session_id})).await?;
+                let reply = control
+                    .call("session.attach", json!({"session_id": session_id}))
+                    .await?;
                 // Follow the terminal sizes this window asks for, unless another client owns them.
                 control
-                    .call("session.own_block", json!({"session_id": session_id, "mode": "request"}))
+                    .call(
+                        "session.own_block",
+                        json!({"session_id": session_id, "mode": "request"}),
+                    )
                     .await?;
                 let view: SessionView = serde_json::from_value(reply["view"].clone())?;
                 let sessions = list_sessions(&control).await?;
@@ -207,25 +225,29 @@ impl Workspace {
     }
 
     fn set_view(&mut self, view: SessionView, cx: &mut Context<Self>) {
-        if self.view.as_ref().is_some_and(|v| v.session_id == view.session_id && v.revision > view.revision) {
+        if self
+            .view
+            .as_ref()
+            .is_some_and(|v| v.session_id == view.session_id && v.revision > view.revision)
+        {
             return;
         }
         // Keep panes for blocks still in a layout, including ones a zoom hides, so their
         // streams stay open; make panes for new ones.
-        let placed: Vec<String> = view
-            .windows
-            .iter()
-            .flat_map(|w| w.all_blocks())
-            .collect();
+        let placed: Vec<String> = view.windows.iter().flat_map(|w| w.all_blocks()).collect();
         self.panes.retain(|id, _| placed.contains(id));
         for block_id in placed {
             if !self.panes.contains_key(&block_id) {
                 let control = self.control.clone();
                 let session_id = view.session_id.clone();
-                let pane = cx.new(|cx| TerminalPane::new(control, session_id, block_id.clone(), cx));
+                let pane =
+                    cx.new(|cx| TerminalPane::new(control, session_id, block_id.clone(), cx));
                 // Titles show in the tabs and sidebar, so redraw when a pane's changes. Not on
                 // every change to the pane, which would redraw every pane with it.
-                cx.subscribe(&pane, |_, _, _: &crate::terminal::InfoChanged, cx| cx.notify()).detach();
+                cx.subscribe(&pane, |_, _, _: &crate::terminal::InfoChanged, cx| {
+                    cx.notify()
+                })
+                .detach();
                 self.panes.insert(block_id, pane);
             }
         }
@@ -235,10 +257,15 @@ impl Workspace {
     }
 
     fn refresh_view(&mut self, cx: &mut Context<Self>) {
-        let Some(session_id) = self.session_id() else { return };
+        let Some(session_id) = self.session_id() else {
+            return;
+        };
         let control = self.control.clone();
         cx.spawn(async move |this, cx| {
-            match control.call("session.view", json!({"session_id": session_id})).await {
+            match control
+                .call("session.view", json!({"session_id": session_id}))
+                .await
+            {
                 Ok(reply) => {
                     if let Ok(view) = serde_json::from_value::<SessionView>(reply) {
                         let _ = this.update(cx, |this, cx| this.set_view(view, cx));
@@ -269,7 +296,8 @@ impl Workspace {
             "hosts_changed" => self.load_hosts(cx),
             "session_destroyed" => {
                 let gone = event.payload["session_id"].as_str().map(str::to_string);
-                self.sessions.retain(|s| Some(&s.session_id) != gone.as_ref());
+                self.sessions
+                    .retain(|s| Some(&s.session_id) != gone.as_ref());
                 if gone.is_some() && gone == self.session_id() {
                     self.view = None;
                     self.panes.clear();
@@ -316,7 +344,9 @@ impl Workspace {
     }
 
     fn call(&self, method: &'static str, mut payload: Value) {
-        let Some(session_id) = self.session_id() else { return };
+        let Some(session_id) = self.session_id() else {
+            return;
+        };
         payload["session_id"] = json!(session_id);
         self.control.send(method, payload);
     }
@@ -324,7 +354,10 @@ impl Workspace {
     fn active_window(&self) -> Option<&WindowView> {
         let view = self.view.as_ref()?;
         let active = view.active_window_id.as_ref();
-        view.windows.iter().find(|w| Some(&w.window_id) == active).or(view.windows.first())
+        view.windows
+            .iter()
+            .find(|w| Some(&w.window_id) == active)
+            .or(view.windows.first())
     }
 
     fn focused_block_id(&self) -> Option<String> {
@@ -344,7 +377,9 @@ impl Workspace {
     }
 
     fn split(&mut self, anchor: Option<String>, direction: &'static str, cx: &mut Context<Self>) {
-        let Some(session_id) = self.session_id() else { return };
+        let Some(session_id) = self.session_id() else {
+            return;
+        };
         let control = self.control.clone();
         cx.spawn(async move |_, _| {
             let cwd = match &anchor {
@@ -372,7 +407,9 @@ impl Workspace {
     }
 
     fn new_window(&mut self, _: &NewWindow, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(session_id) = self.session_id() else { return };
+        let Some(session_id) = self.session_id() else {
+            return;
+        };
         let anchor = self.focused_block_id();
         let control = self.control.clone();
         cx.spawn(async move |_, _| {
@@ -393,20 +430,29 @@ impl Workspace {
 
     fn new_session(&mut self, _: &NewSession, _: &mut Window, cx: &mut Context<Self>) {
         let control = self.control.clone();
-        cx.spawn(async move |this, cx| match create_session(&control, None).await {
-            Ok(id) => {
-                let _ = this.update(cx, |this, cx| this.attach(id, cx));
-            }
-            Err(err) => log::warn!("{err:#}"),
-        })
+        cx.spawn(
+            async move |this, cx| match create_session(&control, None).await {
+                Ok(id) => {
+                    let _ = this.update(cx, |this, cx| this.attach(id, cx));
+                }
+                Err(err) => log::warn!("{err:#}"),
+            },
+        )
         .detach();
     }
 
     fn next_session(&mut self, _: &NextSession, _: &mut Window, cx: &mut Context<Self>) {
         let current = self.session_id();
-        let index = self.sessions.iter().position(|s| Some(&s.session_id) == current.as_ref());
+        let index = self
+            .sessions
+            .iter()
+            .position(|s| Some(&s.session_id) == current.as_ref());
         let next = index.map_or(0, |i| (i + 1) % self.sessions.len().max(1));
-        if let Some(next) = self.sessions.get(next).filter(|s| Some(&s.session_id) != current.as_ref()) {
+        if let Some(next) = self
+            .sessions
+            .get(next)
+            .filter(|s| Some(&s.session_id) != current.as_ref())
+        {
             self.attach(next.session_id.clone(), cx);
         }
     }
@@ -423,7 +469,9 @@ impl Workspace {
         let client_side = matches!(window.window_decorations(), Decorations::Client { .. });
         let view = self.view.as_ref();
         let active = view.and_then(|v| v.active_window_id.clone());
-        let session_label = view.map(|v| v.label.clone()).unwrap_or_else(|| "Rex".into());
+        let session_label = view
+            .map(|v| v.label.clone())
+            .unwrap_or_else(|| "Rex".into());
 
         let tabs = view.into_iter().flat_map(|v| v.windows.iter()).map(|w| {
             let is_active = Some(&w.window_id) == active.as_ref();
@@ -442,7 +490,9 @@ impl Workspace {
                 .cursor_pointer()
                 .map(|tab| {
                     if is_active {
-                        tab.bg(rgb(ui().tab_active)).border_color(rgb(ui().tab_active_border)).text_color(rgb(ui().text))
+                        tab.bg(rgb(ui().tab_active))
+                            .border_color(rgb(ui().tab_active_border))
+                            .text_color(rgb(ui().text))
                     } else {
                         tab.border_color(gpui::transparent_black())
                             .text_color(rgb(ui().text_dim))
@@ -453,7 +503,11 @@ impl Workspace {
                 .on_click(cx.listener(move |this, _, _, _| {
                     this.call("session.focus_window", json!({"window_id": window_id}));
                 }))
-                .child(icon("icons/terminal.svg", 14., if is_active { ui().text } else { ui().text_dim }))
+                .child(icon(
+                    "icons/terminal.svg",
+                    14.,
+                    if is_active { ui().text } else { ui().text_dim },
+                ))
                 .child(div().truncate().child(self.window_title(w, cx)))
         });
 
@@ -481,8 +535,9 @@ impl Workspace {
                 })
             })
             .child(
-                icon_button("sidebar", "icons/sidebar.svg", self.sidebar)
-                    .on_click(cx.listener(|this, _, window, cx| this.toggle_sidebar(&ToggleSidebar, window, cx))),
+                icon_button("sidebar", "icons/sidebar.svg", self.sidebar).on_click(cx.listener(
+                    |this, _, window, cx| this.toggle_sidebar(&ToggleSidebar, window, cx),
+                )),
             )
             .child(
                 div()
@@ -504,19 +559,37 @@ impl Workspace {
                             .flex()
                             .flex_col()
                             .line_height(px(15.))
-                            .child(div().text_color(rgb(ui().text)).font_weight(FontWeight::SEMIBOLD).child(session_label))
-                            .child(div().text_xs().text_color(rgb(ui().text_faint)).child(self.host_title())),
+                            .child(
+                                div()
+                                    .text_color(rgb(ui().text))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(session_label),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(ui().text_faint))
+                                    .child(self.host_title()),
+                            ),
                     ),
             )
-            .child(div().flex().flex_1().min_w(px(0.)).gap_1().items_center().children(tabs))
             .child(
-                icon_button("theme", "icons/palette.svg", self.theme_menu.is_some())
-                    .on_click(cx.listener(|this, _, window, cx| this.toggle_theme_menu(window, cx))),
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .gap_1()
+                    .items_center()
+                    .children(tabs),
             )
             .child(
-                icon_button("new-window", "icons/plus.svg", false)
-                    .on_click(cx.listener(|this, _, window, cx| this.new_window(&NewWindow, window, cx))),
+                icon_button("theme", "icons/palette.svg", self.theme_menu.is_some()).on_click(
+                    cx.listener(|this, _, window, cx| this.toggle_theme_menu(window, cx)),
+                ),
             )
+            .child(icon_button("new-window", "icons/plus.svg", false).on_click(
+                cx.listener(|this, _, window, cx| this.new_window(&NewWindow, window, cx)),
+            ))
             .when(client_side, |bar| bar.child(window_controls(window)))
     }
 
@@ -535,14 +608,22 @@ impl Workspace {
                     .pb_1()
                     .text_xs()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(if is_current { ui().text_dim } else { ui().text_faint }))
+                    .text_color(rgb(if is_current {
+                        ui().text_dim
+                    } else {
+                        ui().text_faint
+                    }))
                     .cursor_pointer()
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if this.session_id().as_ref() != Some(&session_id) {
                             this.attach(session_id.clone(), cx);
                         }
                     }))
-                    .child(if session.label.is_empty() { session.session_id.clone() } else { session.label.clone() }),
+                    .child(if session.label.is_empty() {
+                        session.session_id.clone()
+                    } else {
+                        session.label.clone()
+                    }),
             );
             if !is_current {
                 continue;
@@ -566,7 +647,11 @@ impl Workspace {
                         .on_click(cx.listener(move |this, _, _, _| {
                             this.call("session.focus_window", json!({"window_id": window_id}));
                         }))
-                        .child(icon("icons/terminal.svg", 14., if is_active { ui().text } else { ui().text_dim }))
+                        .child(icon(
+                            "icons/terminal.svg",
+                            14.,
+                            if is_active { ui().text } else { ui().text_dim },
+                        ))
                         .child(div().truncate().child(self.window_title(w, cx))),
                 );
             }
@@ -584,9 +669,18 @@ impl Workspace {
     fn render_window(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // The cards sit `GAP` apart, and `GAP / 2` in from each edge of this area plus its own.
         const GAP: f32 = 8.;
-        let mut area = div().relative().flex_1().h_full().min_w(px(0.)).mr(px(GAP / 2.)).mb(px(GAP / 2.));
+        let mut area = div()
+            .relative()
+            .flex_1()
+            .h_full()
+            .min_w(px(0.))
+            .mr(px(GAP / 2.))
+            .mb(px(GAP / 2.));
         let Some(rex_window) = self.active_window().cloned() else {
-            let message = self.error.clone().unwrap_or_else(|| "Connecting to Rex…".into());
+            let message = self
+                .error
+                .clone()
+                .unwrap_or_else(|| "Connecting to Rex…".into());
             return area
                 .flex()
                 .items_center()
@@ -597,11 +691,18 @@ impl Workspace {
 
         // Give keyboard focus to the block the server says is focused, when that changes.
         if rex_window.focused_block_id != self.focused_block {
-            if let Some(pane) = rex_window.focused_block_id.as_ref().and_then(|id| self.panes.get(id)) {
+            if let Some(pane) = rex_window
+                .focused_block_id
+                .as_ref()
+                .and_then(|id| self.panes.get(id))
+            {
                 window.focus(&pane.focus_handle(cx));
             }
             // Panes are cached views, so the two whose cursors change must be told to redraw.
-            for id in [&self.focused_block, &rex_window.focused_block_id].into_iter().flatten() {
+            for id in [&self.focused_block, &rex_window.focused_block_id]
+                .into_iter()
+                .flatten()
+            {
                 if let Some(pane) = self.panes.get(id) {
                     pane.update(cx, |_, cx| cx.notify());
                 }
@@ -611,7 +712,9 @@ impl Workspace {
 
         let zoomed = rex_window.zoomed_block_id.is_some();
         for (block_id, [x, y, w, h]) in rex_window.placed_blocks() {
-            let Some(pane) = self.panes.get(&block_id).cloned() else { continue };
+            let Some(pane) = self.panes.get(&block_id).cloned() else {
+                continue;
+            };
             let focused = Some(&block_id) == rex_window.focused_block_id.as_ref();
             area = area.child(
                 div()
@@ -645,8 +748,12 @@ impl Workspace {
                 .invisible()
                 .group_hover(group.clone(), |d| d.visible())
         };
-        let (split_right, split_down, zoom, close) =
-            (block_id.clone(), block_id.clone(), block_id.clone(), block_id.clone());
+        let (split_right, split_down, zoom, close) = (
+            block_id.clone(),
+            block_id.clone(),
+            block_id.clone(),
+            block_id.clone(),
+        );
 
         div()
             .id(SharedString::from(format!("card-{block_id}")))
@@ -657,7 +764,11 @@ impl Workspace {
             .rounded(px(12.))
             .overflow_hidden()
             .border_1()
-            .border_color(rgb(if focused { ui().card_border_focused } else { ui().card_border }))
+            .border_color(rgb(if focused {
+                ui().card_border_focused
+            } else {
+                ui().card_border
+            }))
             .bg(background)
             .on_mouse_down(
                 MouseButton::Left,
@@ -679,22 +790,40 @@ impl Workspace {
                     .text_sm()
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(if focused { ui().text } else { ui().text_dim }))
-                    .child(icon("icons/terminal.svg", 14., if focused { ui().text } else { ui().text_dim }))
+                    .child(icon(
+                        "icons/terminal.svg",
+                        14.,
+                        if focused { ui().text } else { ui().text_dim },
+                    ))
                     .child(div().flex_1().min_w(px(0.)).truncate().child(title))
-                    .child(button("split-right", "icons/split-right.svg").on_click(cx.listener(
-                        move |this, _, _, cx| this.split(Some(split_right.clone()), "horizontal", cx),
-                    )))
-                    .child(button("split-down", "icons/split-down.svg").on_click(cx.listener(
-                        move |this, _, _, cx| this.split(Some(split_down.clone()), "vertical", cx),
-                    )))
                     .child(
-                        button("zoom", if zoomed { "icons/minimize.svg" } else { "icons/maximize.svg" })
-                            .on_click(cx.listener(move |this, _, _, _| this.zoom_block(zoom.clone()))),
+                        button("split-right", "icons/split-right.svg").on_click(cx.listener(
+                            move |this, _, _, cx| {
+                                this.split(Some(split_right.clone()), "horizontal", cx)
+                            },
+                        )),
                     )
                     .child(
-                        button("close", "icons/close.svg")
-                            .on_click(cx.listener(move |this, _, _, _| this.close_block(close.clone()))),
-                    ),
+                        button("split-down", "icons/split-down.svg").on_click(cx.listener(
+                            move |this, _, _, cx| {
+                                this.split(Some(split_down.clone()), "vertical", cx)
+                            },
+                        )),
+                    )
+                    .child(
+                        button(
+                            "zoom",
+                            if zoomed {
+                                "icons/minimize.svg"
+                            } else {
+                                "icons/maximize.svg"
+                            },
+                        )
+                        .on_click(cx.listener(move |this, _, _, _| this.zoom_block(zoom.clone()))),
+                    )
+                    .child(button("close", "icons/close.svg").on_click(
+                        cx.listener(move |this, _, _, _| this.close_block(close.clone())),
+                    )),
             )
             .child(
                 div()
@@ -735,7 +864,9 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::new_session))
             .on_action(cx.listener(Self::next_session))
             .on_action(cx.listener(Self::toggle_sidebar))
-            .on_action(cx.listener(|this, _: &RenameSession, window, cx| this.open_rename(window, cx)))
+            .on_action(
+                cx.listener(|this, _: &RenameSession, window, cx| this.open_rename(window, cx)),
+            )
             .on_action(cx.listener(|this, _: &ClosePane, _, _| {
                 if let Some(id) = this.focused_block_id() {
                     this.close_block(id);
@@ -780,15 +911,25 @@ impl Render for Workspace {
                     .child(self.render_window(window, cx)),
             )
             .when(self.host_menu, |d| d.child(self.render_host_menu(cx)))
-            .when_some(self.theme_menu.as_ref(), |d, menu| d.child(self.render_theme_menu(menu, cx)))
-            .when_some(self.add_host.as_ref(), |d, dialog| d.child(self.render_add_host(dialog, cx)))
-            .when_some(self.rename.as_ref(), |d, dialog| d.child(self.render_rename(dialog, cx)));
+            .when_some(self.theme_menu.as_ref(), |d, menu| {
+                d.child(self.render_theme_menu(menu, cx))
+            })
+            .when_some(self.add_host.as_ref(), |d, dialog| {
+                d.child(self.render_add_host(dialog, cx))
+            })
+            .when_some(self.rename.as_ref(), |d, dialog| {
+                d.child(self.render_rename(dialog, cx))
+            });
         window_frame(content.into_any_element(), window)
     }
 }
 
 fn icon(path: &'static str, size: f32, color: u32) -> impl IntoElement {
-    svg().path(path).size(px(size)).flex_none().text_color(rgb(color))
+    svg()
+        .path(path)
+        .size(px(size))
+        .flex_none()
+        .text_color(rgb(color))
 }
 
 fn icon_button(id: &'static str, path: &'static str, active: bool) -> gpui::Stateful<gpui::Div> {
@@ -841,12 +982,21 @@ fn window_controls(window: &Window) -> impl IntoElement {
         .pl_3()
         .when(controls.minimize, |d| {
             d.child(
-                button("minimize", "icons/win-minimize.svg", ui().tab_active_border, ui().text)
-                    .on_click(|_, window, _| window.minimize_window()),
+                button(
+                    "minimize",
+                    "icons/win-minimize.svg",
+                    ui().tab_active_border,
+                    ui().text,
+                )
+                .on_click(|_, window, _| window.minimize_window()),
             )
         })
         .when(controls.maximize, |d| {
-            let path = if window.is_maximized() { "icons/win-restore.svg" } else { "icons/win-maximize.svg" };
+            let path = if window.is_maximized() {
+                "icons/win-restore.svg"
+            } else {
+                "icons/win-maximize.svg"
+            };
             d.child(
                 button("maximize", path, ui().tab_active_border, ui().text)
                     .on_click(|_, window, _| window.zoom_window()),
@@ -901,16 +1051,25 @@ fn window_frame(content: AnyElement, window: &mut Window) -> AnyElement {
             canvas(
                 |_, window, _| {
                     let size = window.window_bounds().get_bounds().size;
-                    window.insert_hitbox(Bounds::new(point(px(0.), px(0.)), size), HitboxBehavior::Normal)
+                    window.insert_hitbox(
+                        Bounds::new(point(px(0.), px(0.)), size),
+                        HitboxBehavior::Normal,
+                    )
                 },
                 |_, hitbox, window, _| {
                     let size = window.window_bounds().get_bounds().size;
-                    let Some(edge) = resize_edge(window.mouse_position(), size) else { return };
+                    let Some(edge) = resize_edge(window.mouse_position(), size) else {
+                        return;
+                    };
                     let style = match edge {
                         ResizeEdge::Top | ResizeEdge::Bottom => CursorStyle::ResizeUpDown,
                         ResizeEdge::Left | ResizeEdge::Right => CursorStyle::ResizeLeftRight,
-                        ResizeEdge::TopLeft | ResizeEdge::BottomRight => CursorStyle::ResizeUpLeftDownRight,
-                        ResizeEdge::TopRight | ResizeEdge::BottomLeft => CursorStyle::ResizeUpRightDownLeft,
+                        ResizeEdge::TopLeft | ResizeEdge::BottomRight => {
+                            CursorStyle::ResizeUpLeftDownRight
+                        }
+                        ResizeEdge::TopRight | ResizeEdge::BottomLeft => {
+                            CursorStyle::ResizeUpRightDownLeft
+                        }
                     };
                     window.set_cursor_style(style, &hitbox);
                 },
@@ -965,7 +1124,11 @@ fn pick_session(sessions: &[SessionSummary], target: Option<&str>) -> Option<Str
 
 async fn create_session(control: &Control, label: Option<&str>) -> Result<String> {
     // A remote server's home is its own, so let it pick the directory.
-    let cwd = if control.endpoint.is_local() { std::env::var("HOME").unwrap_or_default() } else { String::new() };
+    let cwd = if control.endpoint.is_local() {
+        std::env::var("HOME").unwrap_or_default()
+    } else {
+        String::new()
+    };
     let mut payload = json!({
         "initial_windows": [{"layout": {"block": {"flavor": SHELL, "options": {"cwd": cwd}}}}],
     });
@@ -979,8 +1142,16 @@ async fn create_session(control: &Control, label: Option<&str>) -> Result<String
 /// The directory a new split or window should start in: where the anchor's program is.
 async fn current_dir(control: &Control, session_id: &str, block_id: &str) -> Option<String> {
     let process = control
-        .block_call("com.superlogical.terminal.process", session_id, block_id, json!({}))
+        .block_call(
+            "com.superlogical.terminal.process",
+            session_id,
+            block_id,
+            json!({}),
+        )
         .await
         .ok()?;
-    process["foreground"]["cwd"].as_str().filter(|c| !c.is_empty()).map(str::to_string)
+    process["foreground"]["cwd"]
+        .as_str()
+        .filter(|c| !c.is_empty())
+        .map(str::to_string)
 }
