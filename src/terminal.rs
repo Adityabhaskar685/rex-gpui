@@ -560,11 +560,11 @@ impl TerminalPane {
                 self.finish_selection(cx);
                 return;
             }
-            if let Some(point) = self.viewport_point(event.position) {
-                if point != anchor || self.term().term.has_selection() {
-                    self.term().term.select(anchor, point);
-                    cx.notify();
-                }
+            if let Some(point) = self.viewport_point(event.position)
+                && (point != anchor || self.term().term.has_selection())
+            {
+                self.term().term.select(anchor, point);
+                cx.notify();
             }
             return;
         }
@@ -1142,10 +1142,10 @@ impl Theme {
             let Some((index, color)) = entry.as_str().and_then(|e| e.split_once('=')) else {
                 continue;
             };
-            if let (Ok(index), Some(color)) = (index.parse::<usize>(), parse_hex(color)) {
-                if index < 256 {
-                    theme.palette[index] = color;
-                }
+            if let (Ok(index), Some(color)) = (index.parse::<usize>(), parse_hex(color))
+                && index < 256
+            {
+                theme.palette[index] = color;
             }
         }
         theme.key = format!("{}/{msg}", theme.key);

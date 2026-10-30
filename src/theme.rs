@@ -476,12 +476,11 @@ fn parse_ghostty(path: &Path) -> Option<AppTheme> {
             "selection-background" => selection = hex(value),
             "selection-foreground" => selection_fg = hex(value),
             "palette" => {
-                if let Some((index, color)) = value.split_once('=') {
-                    if let (Ok(index), Some(color)) = (index.trim().parse::<usize>(), hex(color)) {
-                        if index < 16 {
-                            ansi[index] = Some(color);
-                        }
-                    }
+                if let Some((index, color)) = value.split_once('=')
+                    && let (Ok(index), Some(color)) = (index.trim().parse::<usize>(), hex(color))
+                    && index < 16
+                {
+                    ansi[index] = Some(color);
                 }
             }
             _ => {}

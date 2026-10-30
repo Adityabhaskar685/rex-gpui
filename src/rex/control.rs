@@ -47,10 +47,10 @@ impl Control {
     ) -> Result<(Self, async_channel::Receiver<Event>)> {
         let mut last_error = anyhow!("no address to connect to");
         for endpoint in endpoints {
-            if let (true, Endpoint::Unix(socket)) = (autostart, endpoint) {
-                if !socket.exists() {
-                    start_server().await?;
-                }
+            if let (true, Endpoint::Unix(socket)) = (autostart, endpoint)
+                && !socket.exists()
+            {
+                start_server().await?;
             }
             match endpoint.connect("/api/control", "rex.control.v1").await {
                 Ok(ws) => return Self::handshake(ws, endpoint.clone()).await,

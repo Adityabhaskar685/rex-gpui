@@ -495,7 +495,7 @@ impl RenderState {
 
         let mut c = sized!(ffi::GhosttyRenderStateCursor);
         self.get(ffi::GHOSTTY_RENDER_STATE_DATA_CURSOR, &mut c);
-        let cursor = (c.visible && c.viewport_has_value).then(|| Cursor {
+        let cursor = (c.visible && c.viewport_has_value).then_some(Cursor {
             x: c.viewport_x,
             y: c.viewport_y,
             shape: match c.visual_style {
@@ -631,7 +631,7 @@ impl RenderState {
             faint: style.faint,
             inverse: style.inverse,
             invisible: style.invisible,
-            underline: style.underline != ffi::GHOSTTY_SGR_UNDERLINE_NONE as i32,
+            underline: style.underline != ffi::GHOSTTY_SGR_UNDERLINE_NONE,
             strikethrough: style.strikethrough,
             selected,
         }

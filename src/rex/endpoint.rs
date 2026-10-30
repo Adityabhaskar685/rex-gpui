@@ -173,22 +173,21 @@ pub async fn resolve(server: &str) -> Result<Vec<Endpoint>> {
         || server.contains('.')
         || server.contains(':')
         || server.starts_with('/');
-    if !looks_like_address {
-        if let Ok((local, _events)) = Control::connect(&[Endpoint::local()], false).await {
-            if let Ok(reply) = local.call("hosts.list", json!({})).await {
-                let host = reply["hosts"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .find(|h| h["label"] == server || h["id"] == server);
-                if let Some(host) = host {
-                    let mut out = Vec::new();
-                    for e in host["endpoints"].as_array().into_iter().flatten() {
-                        out.extend(Endpoint::candidates(e.as_str().unwrap_or_default())?);
-                    }
-                    return Ok(out);
-                }
+    if !looks_like_address
+        && let Ok((local, _events)) = Control::connect(&[Endpoint::local()], false).await
+        && let Ok(reply) = local.call("hosts.list", json!({})).await
+    {
+        let host = reply["hosts"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|h| h["label"] == server || h["id"] == server);
+        if let Some(host) = host {
+            let mut out = Vec::new();
+            for e in host["endpoints"].as_array().into_iter().flatten() {
+                out.extend(Endpoint::candidates(e.as_str().unwrap_or_default())?);
             }
+            return Ok(out);
         }
     }
     Endpoint::candidates(server)
