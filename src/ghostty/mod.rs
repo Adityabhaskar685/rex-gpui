@@ -324,8 +324,8 @@ pub struct Cursor {
 }
 
 /// Everything needed to draw one frame of a terminal.
-pub struct Frame {
-    pub rows: Vec<Vec<Cell>>,
+pub struct Frame<'a> {
+    pub rows: &'a [Vec<Cell>],
     pub foreground: Rgb,
     pub background: Rgb,
     pub cursor_color: Option<Rgb>,
@@ -338,6 +338,10 @@ pub struct RenderState {
     state: ffi::GhosttyRenderState,
     rows: ffi::GhosttyRenderStateRowIterator,
     cells: ffi::GhosttyRenderStateRowCells,
+    /// Each row's cells as last read. Only rows libghostty-vt marks dirty are read again.
+    cache: Vec<Vec<Cell>>,
+    /// Read every row on the next frame, as after the default colors change.
+    stale: bool,
 }
 
 // SAFETY: a render state belongs to one pane and is used from the UI thread only.
@@ -361,7 +365,7 @@ impl RenderState {
             check(ffi::ghostty_render_state_row_iterator_new(null(), &mut rows), "creating a row iterator")?;
             check(ffi::ghostty_render_state_row_cells_new(null(), &mut cells), "creating a cell iterator")?;
         }
-        Ok(Self { state, rows, cells })
+        Ok(Self { state, rows, cells, cache: Vec::new(), stale: true })
     }
 
     /// Copy the terminal's current state. Call it with the terminal locked; reading the copy
@@ -370,11 +374,17 @@ impl RenderState {
         unsafe { ffi::ghostty_render_state_update(self.state, terminal.0) };
     }
 
+    /// Read every row again on the next frame, not just the ones libghostty-vt marks dirty.
+    pub fn invalidate(&mut self) {
+        self.stale = true;
+    }
+
     fn get<T>(&self, data: ffi::GhosttyRenderStateData, out: &mut T) -> bool {
         unsafe { ffi::ghostty_render_state_get(self.state, data, out as *mut T as *mut c_void) == ffi::GHOSTTY_SUCCESS }
     }
 
-    pub fn frame(&mut self) -> Frame {
+    /// The frame to draw. Rows that haven't changed since the last frame come from the cache.
+    pub fn frame(&mut self) -> Frame<'_> {
         let mut colors = sized!(ffi::GhosttyRenderStateColors);
         self.get(ffi::GHOSTTY_RENDER_STATE_DATA_COLORS, &mut colors);
 
@@ -391,22 +401,50 @@ impl RenderState {
             },
         });
 
-        let mut rows = Vec::new();
-        let mut iterator = self.rows;
-        self.get(ffi::GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR, &mut iterator);
-        unsafe {
-            while ffi::ghostty_render_state_row_iterator_next(self.rows) {
-                let mut cells = self.cells;
-                ffi::ghostty_render_state_row_get(self.rows, ffi::GHOSTTY_RENDER_STATE_ROW_DATA_CELLS, &mut cells as *mut _ as *mut c_void);
-                let mut row = Vec::new();
-                while ffi::ghostty_render_state_row_cells_next(self.cells) {
-                    row.push(self.cell());
+        let mut dirty: ffi::GhosttyRenderStateDirty = ffi::GHOSTTY_RENDER_STATE_DIRTY_FULL;
+        self.get(ffi::GHOSTTY_RENDER_STATE_DATA_DIRTY, &mut dirty);
+        let mut rows: u16 = 0;
+        self.get(ffi::GHOSTTY_RENDER_STATE_DATA_ROWS, &mut rows);
+        let full = std::mem::take(&mut self.stale)
+            || dirty == ffi::GHOSTTY_RENDER_STATE_DIRTY_FULL
+            || self.cache.len() != rows as usize;
+        if full || dirty != ffi::GHOSTTY_RENDER_STATE_DIRTY_FALSE {
+            self.cache.resize_with(rows as usize, Vec::new);
+            let mut iterator = self.rows;
+            self.get(ffi::GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR, &mut iterator);
+            unsafe {
+                let mut y = 0;
+                while ffi::ghostty_render_state_row_iterator_next(self.rows) && y < self.cache.len() {
+                    let mut row_dirty = true;
+                    if !full {
+                        ffi::ghostty_render_state_row_get(
+                            self.rows,
+                            ffi::GHOSTTY_RENDER_STATE_ROW_DATA_DIRTY,
+                            &mut row_dirty as *mut _ as *mut c_void,
+                        );
+                    }
+                    if row_dirty {
+                        let mut cells = self.cells;
+                        ffi::ghostty_render_state_row_get(
+                            self.rows,
+                            ffi::GHOSTTY_RENDER_STATE_ROW_DATA_CELLS,
+                            &mut cells as *mut _ as *mut c_void,
+                        );
+                        let mut row = std::mem::take(&mut self.cache[y]);
+                        row.clear();
+                        while ffi::ghostty_render_state_row_cells_next(self.cells) {
+                            row.push(self.cell());
+                        }
+                        self.cache[y] = row;
+                    }
+                    y += 1;
                 }
-                rows.push(row);
+                // What's cached now matches the terminal, so the next frame starts clean.
+                ffi::ghostty_render_state_clean(self.state);
             }
         }
         Frame {
-            rows,
+            rows: &self.cache,
             foreground: rgb(colors.foreground),
             background: rgb(colors.background),
             cursor_color: colors.cursor_has_value.then(|| rgb(colors.cursor)),
@@ -495,6 +533,33 @@ mod tests {
         assert_eq!(term.selection_text().as_deref(), Some("world"));
         term.clear_selection();
         assert!(!term.has_selection());
+    }
+
+    #[test]
+    fn redraws_changed_rows_from_the_cache() {
+        let text = |frame: &Frame, y: usize| -> String {
+            frame.rows[y].iter().map(|c| if c.text.is_empty() { " " } else { c.text.as_str() }).collect::<String>().trim_end().to_string()
+        };
+        let mut term = Terminal::new(20, 3).unwrap();
+        let mut state = RenderState::new().unwrap();
+        term.write(b"one\r\ntwo");
+        state.update(&term);
+        assert_eq!(text(&state.frame(), 1), "two");
+        // Nothing changed: the frame comes from the cache.
+        state.update(&term);
+        assert_eq!(text(&state.frame(), 0), "one");
+        // One row changes; the other keeps its cached cells.
+        term.write(b"\x1b[2;1Hdos");
+        state.update(&term);
+        let frame = state.frame();
+        assert_eq!((text(&frame, 0), text(&frame, 1)), ("one".to_string(), "dos".to_string()));
+        // A selection marks its rows dirty.
+        term.select(ViewportPoint { x: 0, y: 0 }, ViewportPoint { x: 2, y: 0 });
+        state.update(&term);
+        assert!(state.frame().rows[0][1].selected);
+        term.clear_selection();
+        state.update(&term);
+        assert!(!state.frame().rows[0][1].selected);
     }
 
     #[test]

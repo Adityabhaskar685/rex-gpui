@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 use gpui::{
-    AnyElement, App, Bounds, Context, CursorStyle, Decorations, Entity, FocusHandle, Focusable,
+    AnyElement, AnyView, StyleRefinement, App, Bounds, Context, CursorStyle, Decorations, Entity, FocusHandle, Focusable,
     FontWeight, HitboxBehavior, MouseButton, Pixels, Point, ResizeEdge, SharedString, Size,
     Task, Window, actions, canvas, div, point, prelude::*, px, relative, rgb, svg,
 };
@@ -600,6 +600,12 @@ impl Workspace {
             if let Some(pane) = rex_window.focused_block_id.as_ref().and_then(|id| self.panes.get(id)) {
                 window.focus(&pane.focus_handle(cx));
             }
+            // Panes are cached views, so the two whose cursors change must be told to redraw.
+            for id in [&self.focused_block, &rex_window.focused_block_id].into_iter().flatten() {
+                if let Some(pane) = self.panes.get(id) {
+                    pane.update(cx, |_, cx| cx.notify());
+                }
+            }
             self.focused_block = rex_window.focused_block_id.clone();
         }
 
@@ -690,7 +696,17 @@ impl Workspace {
                             .on_click(cx.listener(move |this, _, _, _| this.close_block(close.clone()))),
                     ),
             )
-            .child(div().flex_1().min_h(px(0.)).pl_2().pr_1().pb_1().child(pane))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .pl_2()
+                    .pr_1()
+                    .pb_1()
+                    // A cached view: a pane that hasn't changed reuses its last frame instead of
+                    // drawing again whenever another pane, or the window, redraws.
+                    .child(AnyView::from(pane).cached(StyleRefinement::default().size_full())),
+            )
     }
 
     fn toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {

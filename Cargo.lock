@@ -4627,10 +4627,14 @@ dependencies = [
  "gpui",
  "log",
  "pkg-config",
+ "raw-window-handle",
  "serde",
  "serde_json",
  "tokio",
  "tokio-tungstenite",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-protocols 0.31.2",
 ]
 
 [[package]]

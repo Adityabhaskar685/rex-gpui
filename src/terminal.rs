@@ -587,6 +587,8 @@ impl Render for TerminalPane {
             let key = (shared.generation, theme.key.clone());
             if self.applied_theme.as_ref() != Some(&key) {
                 shared.term.set_default_colors(theme.foreground, theme.background, theme.cursor, &theme.palette);
+                // Cached rows hold colors resolved with the old defaults.
+                self.render_state.invalidate();
                 self.applied_theme = Some(key);
             }
             // Copy what's on screen, then draw from the copy without the lock.

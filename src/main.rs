@@ -4,6 +4,7 @@
 //! it attaches to the first session, or creates one when there are none. SERVER is a host
 //! label from `rex hosts` or an address such as `https://build.example.ts.net`.
 
+mod activation;
 mod assets;
 mod check;
 mod ghostty;
@@ -156,7 +157,11 @@ fn main() {
                 },
             )
             .expect("opening the window");
-        let _ = window;
+        // Present the launch's activation token once the window has drawn, to end the
+        // desktop's busy cursor.
+        let _ = window.update(cx, |_, window, _| {
+            window.on_next_frame(|window, _| activation::finish_startup(window));
+        });
         cx.on_window_closed(|cx| {
             if cx.windows().is_empty() {
                 cx.quit();
