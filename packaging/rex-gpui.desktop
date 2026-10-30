@@ -1,0 +1,17 @@
+[Desktop Entry]
+Type=Application
+Name=Rex
+GenericName=Terminal Multiplexer
+Comment=Linux client for the Rex terminal multiplexer
+Exec=rex-gpui
+Icon=rex-gpui
+Terminal=false
+Categories=System;TerminalEmulator;
+Keywords=terminal;multiplexer;rex;shell;ssh;
+StartupWMClass=rex-gpui
+StartupNotify=true
+Actions=local;
+
+[Desktop Action local]
+Name=Open Local Server
+Exec=rex-gpui -S local
