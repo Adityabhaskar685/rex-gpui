@@ -13,7 +13,8 @@ use serde_json::json;
 
 use crate::rex::control::Control;
 use crate::rex::data::{self, DataMessage, StreamItem, StreamSplitter};
-use crate::terminal::{Listener, fetch_vt, term_config};
+use crate::mirror::fetch_vt;
+use crate::terminal::{Listener, term_config};
 
 pub async fn run(control: Control, target: &str, command: Option<String>) -> Result<()> {
     let reply = control.call("session.attach", json!({"session_id": resolve(&control, target).await?})).await?;

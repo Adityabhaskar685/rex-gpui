@@ -12,9 +12,8 @@ use alacritty_terminal::index::{Column, Line, Point as GridPoint, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::color::Colors;
-use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::term::{Config, Term, TermMode};
-use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Processor, Rgb};
+use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Rgb};
 use gpui::{
     App, Bounds, ClipboardItem, Context, FocusHandle, Focusable, Font, FontWeight, Hsla,
     KeyDownEvent, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
@@ -24,10 +23,8 @@ use serde_json::{Value, json};
 
 use crate::keys;
 use crate::theme::ui;
+use crate::mirror::{self, Mirror, MirrorEvent, SharedTerm};
 use crate::rex::control::Control;
-use crate::rex::data::{self, DataMessage, StreamItem, StreamSplitter};
-
-const FORMAT_CHUNK: u64 = 900_000;
 /// Width kept free at the right of the grid for the scrollbar.
 const SCROLLBAR_WIDTH: f32 = 10.;
 
@@ -37,25 +34,14 @@ impl EventListener for Listener {
     fn send_event(&self, _event: TermEvent) {}
 }
 
-enum Phase {
-    Connecting,
-    /// Skipping the Ghostty snapshot at the head of the stream.
-    Snapshot,
-    /// Fetching the screen as VT text. Output that arrives meanwhile waits in `pending`;
-    /// the first `included` bytes of it were already on screen when the fetch began.
-    Redraw { pending: Vec<u8>, included: Option<usize> },
-    Live,
-    Closed(Option<String>),
-}
-
 pub struct TerminalPane {
     control: Control,
     pub session_id: String,
     pub block_id: String,
-    term: Term<Listener>,
-    processor: Processor,
-    splitter: Option<StreamSplitter>,
-    phase: Phase,
+    /// The local copy of the terminal, which the mirror task fills in.
+    term: SharedTerm,
+    /// What the copy is doing when it isn't live, such as "Connecting…".
+    status: Option<String>,
     /// The terminal's colors from the server, which override the app theme's.
     server_theme: Option<Value>,
     /// Scroll-wheel movement too small to make a whole line yet.
@@ -77,7 +63,8 @@ pub struct TerminalPane {
     /// What the header and tab show: a title a program set, else the program and directory.
     pub info: PaneInfo,
     focus_handle: FocusHandle,
-    _stream: Task<()>,
+    _mirror: Mirror,
+    _events: Task<()>,
 }
 
 #[derive(Default, Clone)]
@@ -130,22 +117,12 @@ struct CellMetrics {
 
 impl TerminalPane {
     pub fn new(control: Control, session_id: String, block_id: String, cx: &mut Context<Self>) -> Self {
-        let term = Term::new(term_config(), &TermSize::new(80, 24), Listener);
-        let stream = cx.spawn({
+        let mirror = mirror::start(control.clone(), session_id.clone(), block_id.clone());
+        let events = cx.spawn({
             let control = control.clone();
             let (session_id, block_id) = (session_id.clone(), block_id.clone());
+            let (rx, dirty) = (mirror.events.clone(), mirror.dirty.clone());
             async move |this, cx| {
-                // Held for as long as this task runs, which is as long as the pane lives.
-                let (rx, _guard) = match data::open_terminal_stream(&control, &session_id, &block_id).await {
-                    Ok(stream) => stream,
-                    Err(err) => {
-                        let _ = this.update(cx, |this, cx| {
-                            this.phase = Phase::Closed(Some(format!("{err:#}")));
-                            cx.notify();
-                        });
-                        return;
-                    }
-                };
                 let (title, process) = futures_util::join!(
                     control.block_call("com.superlogical.terminal.title", &session_id, &block_id, json!({})),
                     control.block_call("com.superlogical.terminal.process", &session_id, &block_id, json!({})),
@@ -157,10 +134,22 @@ impl TerminalPane {
                     if let Ok(process) = process {
                         this.info.apply_process(&process);
                     }
+                    cx.emit(InfoChanged);
                     cx.notify();
                 });
-                while let Ok(msg) = rx.recv().await {
-                    if this.update(cx, |this, cx| this.on_data(msg, cx)).is_err() {
+                while let Ok(event) = rx.recv().await {
+                    let updated = this.update(cx, |this, cx| {
+                        match event {
+                            // Take the redraw before drawing, so a change made while drawing
+                            // asks for another one.
+                            MirrorEvent::Redraw => dirty.store(false, std::sync::atomic::Ordering::Release),
+                            MirrorEvent::Status(status) => this.status = status,
+                            MirrorEvent::Theme(theme) => this.server_theme = Some(theme),
+                            MirrorEvent::Exited(code) => this.exit_code = Some(code),
+                        }
+                        cx.notify();
+                    });
+                    if updated.is_err() {
                         break;
                     }
                 }
@@ -170,10 +159,8 @@ impl TerminalPane {
             control,
             session_id,
             block_id,
-            term,
-            processor: Processor::new(),
-            splitter: None,
-            phase: Phase::Connecting,
+            term: mirror.term.clone(),
+            status: Some("Connecting…".into()),
             server_theme: None,
             scroll_remainder: 0.,
             cell: None,
@@ -186,31 +173,15 @@ impl TerminalPane {
             exit_code: None,
             info: PaneInfo::default(),
             focus_handle: cx.focus_handle(),
-            _stream: stream,
+            _mirror: mirror,
+            _events: events,
         }
     }
 
-    fn on_data(&mut self, msg: DataMessage, cx: &mut Context<Self>) {
-        match msg {
-            DataMessage::Welcome { nonce } => {
-                self.splitter = Some(StreamSplitter::new(nonce));
-                self.phase = Phase::Snapshot;
-            }
-            DataMessage::Bytes(bytes) => {
-                let Some(splitter) = &mut self.splitter else { return };
-                let mut items = Vec::new();
-                splitter.feed(&bytes, &mut items);
-                for item in items {
-                    self.on_item(item);
-                }
-                if let Phase::Redraw { pending, included: included @ None } = &mut self.phase {
-                    *included = Some(pending.len());
-                    self.fetch_redraw(cx);
-                }
-            }
-            DataMessage::Closed(reason) => self.phase = Phase::Closed(reason),
-        }
-        cx.notify();
+    /// Lock the local copy of the terminal. Lock once per statement: the guard lives to the
+    /// end of the statement, and a second lock in it would wait forever.
+    fn term(&self) -> std::sync::MutexGuard<'_, Term<Listener>> {
+        self.term.lock().unwrap()
     }
 
     /// A `block_event` from the server for this block, such as a new title.
@@ -231,6 +202,7 @@ impl TerminalPane {
             "child_exited" => self.exit_code = payload["exit_code"].as_i64(),
             _ => return,
         }
+        cx.emit(InfoChanged);
         cx.notify();
     }
 
@@ -245,65 +217,13 @@ impl TerminalPane {
         to_hsla(self.theme().background)
     }
 
-    fn on_item(&mut self, item: StreamItem) {
-        match item {
-            StreamItem::SnapshotEnd => {
-                self.phase = Phase::Redraw { pending: Vec::new(), included: None };
-            }
-            StreamItem::Output(bytes) => match &mut self.phase {
-                Phase::Live => self.processor.advance(&mut self.term, &bytes),
-                Phase::Redraw { pending, .. } => pending.extend_from_slice(&bytes),
-                _ => {}
-            },
-            StreamItem::Rex(msg) => match msg["type"].as_str() {
-                Some("resize") => {
-                    let cols = msg["cols"].as_u64().unwrap_or(80).max(1) as usize;
-                    let rows = msg["rows"].as_u64().unwrap_or(24).max(1) as usize;
-                    self.term.resize(TermSize::new(cols, rows));
-                }
-                Some("theme") => self.server_theme = Some(msg.clone()),
-                Some("child_exited") => self.exit_code = msg["exit_code"].as_i64(),
-                _ => {}
-            },
-        }
-    }
-
-    /// Read the screen and scrollback as VT text, which stands in for the Ghostty snapshot.
-    fn fetch_redraw(&mut self, cx: &mut Context<Self>) {
-        let control = self.control.clone();
-        let (session_id, block_id) = (self.session_id.clone(), self.block_id.clone());
-        cx.spawn(async move |this, cx| {
-            let content = fetch_vt(&control, &session_id, &block_id).await;
-            let _ = this.update(cx, |this, cx| {
-                let Phase::Redraw { pending, included } =
-                    std::mem::replace(&mut this.phase, Phase::Live)
-                else {
-                    return;
-                };
-                match content {
-                    Ok(content) => {
-                        let size = TermSize::new(this.term.columns(), this.term.screen_lines());
-                        this.term = Term::new(term_config(), &size, Listener);
-                        this.processor = Processor::new();
-                        this.processor.advance(&mut this.term, content.as_bytes());
-                    }
-                    Err(err) => log::warn!("reading the screen of {}: {err:#}", this.block_id),
-                }
-                let included = included.unwrap_or(0).min(pending.len());
-                this.processor.advance(&mut this.term, &pending[included..]);
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
     /// Paste `text`. A program that turned on bracketed paste gets it as one block. Without
     /// it, a shell runs each line as it arrives, so a multi-line paste waits for a yes first.
     fn paste(&mut self, text: String, cx: &mut Context<Self>) {
-        self.term.selection = None;
+        self.term().selection = None;
         self.selecting = false;
         let lines = text.trim_end_matches(['\n', '\r']).lines().count();
-        if lines > 1 && !self.term.mode().contains(TermMode::BRACKETED_PASTE) {
+        if lines > 1 && !self.term().mode().contains(TermMode::BRACKETED_PASTE) {
             self.pending_paste = Some(text);
             cx.notify();
             return;
@@ -347,7 +267,7 @@ impl TerminalPane {
             return;
         }
         if m.control && m.shift && !m.alt && ks.key == "c" {
-            let text = self.term.selection_to_string().unwrap_or_default();
+            let text = self.term().selection_to_string().unwrap_or_default();
             if !text.is_empty() {
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
             }
@@ -355,21 +275,21 @@ impl TerminalPane {
             return;
         }
         if m.shift && !m.control && matches!(ks.key.as_str(), "pageup" | "pagedown") {
-            let rows = self.term.screen_lines() as i32;
+            let rows = self.term().screen_lines() as i32;
             let delta = if ks.key == "pageup" { rows } else { -rows };
-            self.term.scroll_display(Scroll::Delta(delta));
+            self.term().scroll_display(Scroll::Delta(delta));
             cx.notify();
             cx.stop_propagation();
             return;
         }
         let Some(key) = keys::client_key(ks, event.is_held) else { return };
         cx.stop_propagation();
-        if self.term.selection.take().is_some() {
+        if self.term().selection.take().is_some() {
             cx.notify();
         }
         // Typing returns the view to the bottom, as other terminals do.
-        if self.term.grid().display_offset() != 0 {
-            self.term.scroll_display(Scroll::Bottom);
+        if self.term().grid().display_offset() != 0 {
+            self.term().scroll_display(Scroll::Bottom);
             cx.notify();
         }
         self.control.send(
@@ -391,7 +311,7 @@ impl TerminalPane {
 
     fn on_scroll(&mut self, event: &ScrollWheelEvent, _window: &mut Window, cx: &mut Context<Self>) {
         let Some(cell) = self.cell else { return };
-        let mode = *self.term.mode();
+        let mode = *self.term().mode();
         // Full-screen programs and programs that read the mouse get real wheel events. The
         // server's terminal turns them into arrow keys for programs that want that.
         if mode.intersects(TermMode::ALT_SCREEN | TermMode::MOUSE_MODE) && !event.modifiers.shift {
@@ -422,7 +342,7 @@ impl TerminalPane {
         let whole = lines.trunc();
         self.scroll_remainder = lines - whole;
         if whole != 0. {
-            self.term.scroll_display(Scroll::Delta(whole as i32));
+            self.term().scroll_display(Scroll::Delta(whole as i32));
             cx.notify();
         }
     }
@@ -432,10 +352,8 @@ impl TerminalPane {
         let (origin, cell) = (self.origin?, self.cell?);
         let col = ((position.x - origin.x) / cell.width).floor().max(0.0) as usize;
         let row = ((position.y - origin.y) / cell.height).floor().max(0.0) as usize;
-        Some((
-            col.min(self.term.columns().saturating_sub(1)),
-            row.min(self.term.screen_lines().saturating_sub(1)),
-        ))
+        let term = self.term();
+        Some((col.min(term.columns().saturating_sub(1)), row.min(term.screen_lines().saturating_sub(1))))
     }
 
     fn grid_point(&self, position: Point<Pixels>) -> Option<(GridPoint, Side)> {
@@ -443,13 +361,13 @@ impl TerminalPane {
         let cell = self.cell?;
         let within = (position.x - self.origin?.x) / cell.width - col as f32;
         let side = if within < 0.5 { Side::Left } else { Side::Right };
-        let line = Line(row as i32 - self.term.grid().display_offset() as i32);
+        let line = Line(row as i32 - self.term().grid().display_offset() as i32);
         Some((GridPoint::new(line, Column(col)), side))
     }
 
     /// Whether mouse events belong to the program. Shift keeps them local, for selecting.
     fn program_wants_mouse(&self, modifiers: &Modifiers) -> bool {
-        self.term.mode().intersects(TermMode::MOUSE_MODE) && !modifiers.shift
+        self.term().mode().intersects(TermMode::MOUSE_MODE) && !modifiers.shift
     }
 
     fn send_mouse(&self, action: &str, button: Option<MouseButton>, held: Option<MouseButton>, position: Point<Pixels>, modifiers: &Modifiers) {
@@ -491,7 +409,7 @@ impl TerminalPane {
             n if n >= 3 => SelectionType::Lines,
             _ => SelectionType::Simple,
         };
-        self.term.selection = Some(Selection::new(kind, point, side));
+        self.term().selection = Some(Selection::new(kind, point, side));
         self.selecting = true;
         cx.notify();
     }
@@ -499,14 +417,14 @@ impl TerminalPane {
     /// Scroll so the thumb's top follows `y`, measured from the top of the track.
     fn scroll_to_thumb(&mut self, top: f32, cx: &mut Context<Self>) {
         let Some(track) = self.track_height else { return };
-        let history = self.term.grid().history_size() as f32;
-        let total = history + self.term.screen_lines() as f32;
+        let history = self.term().grid().history_size() as f32;
+        let total = history + self.term().screen_lines() as f32;
         // The thumb's top marks the first visible line, counting from the oldest one.
         let first_line = (top / f32::from(track) * total).clamp(0.0, history);
         let offset = (history - first_line).round() as i32;
-        let current = self.term.grid().display_offset() as i32;
+        let current = self.term().grid().display_offset() as i32;
         if offset != current {
-            self.term.scroll_display(Scroll::Delta(offset - current));
+            self.term().scroll_display(Scroll::Delta(offset - current));
             cx.notify();
         }
     }
@@ -514,9 +432,9 @@ impl TerminalPane {
     fn on_scrollbar_down(&mut self, event: &MouseDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         cx.stop_propagation();
         let (Some(origin), Some(track)) = (self.origin, self.track_height) else { return };
-        let history = self.term.grid().history_size() as f32;
-        let total = history + self.term.screen_lines() as f32;
-        let thumb_height = f32::from(track) * self.term.screen_lines() as f32 / total;
+        let history = self.term().grid().history_size() as f32;
+        let total = history + self.term().screen_lines() as f32;
+        let thumb_height = f32::from(track) * self.term().screen_lines() as f32 / total;
         let y = f32::from(event.position.y - origin.y);
         let thumb_top = self.thumb_top(track);
         // Grabbing the thumb keeps its offset under the pointer; clicking the track centers it.
@@ -526,9 +444,9 @@ impl TerminalPane {
     }
 
     fn thumb_top(&self, track: Pixels) -> f32 {
-        let history = self.term.grid().history_size() as f32;
-        let total = history + self.term.screen_lines() as f32;
-        let first_line = history - self.term.grid().display_offset() as f32;
+        let history = self.term().grid().history_size() as f32;
+        let total = history + self.term().screen_lines() as f32;
+        let first_line = history - self.term().grid().display_offset() as f32;
         f32::from(track) * first_line / total
     }
 
@@ -536,10 +454,10 @@ impl TerminalPane {
     fn finish_selection(&mut self, cx: &mut Context<Self>) {
         self.selecting = false;
         // Like other X11 and Wayland terminals, a selection becomes the primary selection.
-        if let Some(text) = self.term.selection_to_string().filter(|t| !t.is_empty()) {
+        if let Some(text) = self.term().selection_to_string().filter(|t| !t.is_empty()) {
             cx.write_to_primary(ClipboardItem::new_string(text));
         } else {
-            self.term.selection = None;
+            self.term().selection = None;
         }
         cx.notify();
     }
@@ -559,17 +477,17 @@ impl TerminalPane {
             return;
         }
         if self.selecting {
-            if let (Some((point, side)), Some(selection)) =
-                (self.grid_point(event.position), self.term.selection.as_mut())
-            {
-                selection.update(point, side);
+            if let Some((point, side)) = self.grid_point(event.position) {
+                if let Some(selection) = self.term().selection.as_mut() {
+                    selection.update(point, side);
+                }
                 cx.notify();
             }
             return;
         }
         // Report drags; plain motion only matters to programs in any-motion mode.
         let wants_motion = event.pressed_button.is_some()
-            || self.term.mode().contains(TermMode::MOUSE_MOTION);
+            || self.term().mode().contains(TermMode::MOUSE_MOTION);
         if wants_motion && self.program_wants_mouse(&event.modifiers) {
             self.send_mouse("motion", None, event.pressed_button, event.position, &event.modifiers);
         }
@@ -595,7 +513,7 @@ impl TerminalPane {
         let width = bounds.size.width - px(SCROLLBAR_WIDTH);
         let cols = ((width / cell.width).floor() as u16).max(2);
         let rows = ((bounds.size.height / cell.height).floor() as u16).max(1);
-        if self.requested == Some((cols, rows)) || !matches!(self.phase, Phase::Live | Phase::Redraw { .. }) {
+        if self.requested == Some((cols, rows)) || self.status.is_some() {
             return;
         }
         self.requested = Some((cols, rows));
@@ -615,50 +533,18 @@ impl TerminalPane {
     }
 
     pub fn status(&self) -> Option<String> {
-        match &self.phase {
-            Phase::Connecting | Phase::Snapshot => Some("Connecting…".into()),
-            Phase::Closed(Some(reason)) => Some(format!("Disconnected: {reason}")),
-            Phase::Closed(None) => Some("Closed".into()),
-            _ => self.exit_code.map(|code| format!("Process exited with code {code}")),
-        }
+        self.status.clone().or_else(|| self.exit_code.map(|code| format!("Process exited with code {code}")))
     }
-}
-
-pub async fn fetch_vt(control: &Control, session_id: &str, block_id: &str) -> anyhow::Result<String> {
-    let mut args = json!({"format": "vt", "max_bytes": FORMAT_CHUNK});
-    for extra in [
-        "charsets", "cursor", "hyperlink", "keyboard", "kitty_keyboard", "modes", "palette",
-        "protection", "pwd", "scrolling_region", "style", "tabstops",
-    ] {
-        args[format!("extra_{extra}")] = json!(true);
-    }
-    let reply = control
-        .block_call("com.superlogical.terminal.format", session_id, block_id, args)
-        .await?;
-    let mut content = reply["content"].as_str().unwrap_or_default().to_string();
-    if let Some(id) = reply["id"].as_u64() {
-        loop {
-            let part = control
-                .block_call(
-                    "com.superlogical.terminal.blob_read",
-                    session_id,
-                    block_id,
-                    json!({"id": id, "offset": content.len(), "max_bytes": FORMAT_CHUNK}),
-                )
-                .await?;
-            let data = part["data"].as_str().unwrap_or_default();
-            content.push_str(data);
-            if part["eof"].as_bool().unwrap_or(true) || data.is_empty() {
-                break;
-            }
-        }
-    }
-    Ok(content)
 }
 
 pub fn term_config() -> Config {
     Config { scrolling_history: 10_000, ..Config::default() }
 }
+
+/// The pane's title, program, or directory changed, which the tabs and sidebar show.
+pub struct InfoChanged;
+
+impl gpui::EventEmitter<InfoChanged> for TerminalPane {}
 
 impl Focusable for TerminalPane {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
@@ -681,6 +567,7 @@ pub fn font_size() -> Pixels {
 
 impl Render for TerminalPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::count_render("pane");
         let font = terminal_font();
         let font_size = font_size();
         let cell = {
@@ -693,7 +580,7 @@ impl Render for TerminalPane {
         self.cell = Some(cell);
 
         let focused = self.focus_handle.is_focused(window);
-        let frame = Frame::capture(&self.term, &self.theme(), focused);
+        let frame = Frame::capture(&self.term(), &self.theme(), focused);
         let background = frame.background;
         let status = self.status();
         let entity = cx.entity();
@@ -754,14 +641,14 @@ impl TerminalPane {
     /// A thin scrollbar over the right edge, when there's scrollback to scroll through.
     fn render_scrollbar(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
         let track = self.track_height?;
-        let history = self.term.grid().history_size();
-        if history == 0 || self.term.mode().contains(TermMode::ALT_SCREEN) {
+        let history = self.term().grid().history_size();
+        if history == 0 || self.term().mode().contains(TermMode::ALT_SCREEN) {
             return None;
         }
-        let total = (history + self.term.screen_lines()) as f32;
-        let height = (f32::from(track) * self.term.screen_lines() as f32 / total).max(24.);
+        let total = (history + self.term().screen_lines()) as f32;
+        let height = (f32::from(track) * self.term().screen_lines() as f32 / total).max(24.);
         let top = self.thumb_top(track).min(f32::from(track) - height);
-        let active = self.scroll_drag.is_some() || self.term.grid().display_offset() != 0;
+        let active = self.scroll_drag.is_some() || self.term().grid().display_offset() != 0;
         let group = SharedString::from(format!("scrollbar-{}", self.block_id));
         Some(
             div()
@@ -1137,4 +1024,41 @@ fn default_palette(ansi: &[u32; 16]) -> [Rgb; 256] {
         palette[232 + i] = Rgb { r: v, g: v, b: v };
     }
     palette
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rex::data::StreamSplitter;
+    use alacritty_terminal::term::test::TermSize;
+    use alacritty_terminal::vte::ansi::Processor;
+
+    /// `cargo test --release -- --ignored --nocapture parse_throughput`
+    #[test]
+    #[ignore]
+    fn parse_throughput() {
+        let line = b"the quick brown fox jumps over the lazy dog 0123456789\r\n";
+        let chunk: Vec<u8> = line.iter().copied().cycle().take(64 * 1024).collect();
+        let chunks = 800; // about 50 MB
+        let mut splitter = StreamSplitter::new(7);
+        let mut items = Vec::new();
+        splitter.feed(b"\x1b_rex1;7;{\"type\":\"resize\",\"cols\":120,\"rows\":40}\x1b\\", &mut items);
+
+        let start = std::time::Instant::now();
+        for _ in 0..chunks {
+            items.clear();
+            splitter.feed(&chunk, &mut items);
+        }
+        let split = start.elapsed();
+
+        let mut term = Term::new(term_config(), &TermSize::new(120, 40), Listener);
+        let mut processor: Processor = Processor::new();
+        let start = std::time::Instant::now();
+        for _ in 0..chunks {
+            processor.advance(&mut term, &chunk);
+        }
+        let parse = start.elapsed();
+        let mb = (chunk.len() * chunks) as f64 / 1e6;
+        println!("splitter: {:.0} MB/s, terminal parser: {:.0} MB/s", mb / split.as_secs_f64(), mb / parse.as_secs_f64());
+    }
 }

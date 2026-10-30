@@ -7,6 +7,7 @@
 mod assets;
 mod check;
 mod keys;
+mod mirror;
 mod rex;
 mod settings;
 mod terminal;
@@ -22,12 +23,32 @@ use crate::rex::control::Control;
 use crate::rex::endpoint::{self, Endpoint};
 use crate::workspace::Workspace;
 
+/// With `RUST_LOG=rex_gpui=debug`, log how many times each kind of view rendered in the
+/// last five seconds, to spot views that redraw when nothing changed.
+pub fn count_render(kind: &'static str) {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use std::time::Instant;
+    static COUNTS: Mutex<Option<(Instant, HashMap<&'static str, u64>)>> = Mutex::new(None);
+    if !log::log_enabled!(log::Level::Debug) {
+        return;
+    }
+    let mut guard = COUNTS.lock().unwrap();
+    let (since, counts) = guard.get_or_insert_with(|| (Instant::now(), HashMap::new()));
+    *counts.entry(kind).or_default() += 1;
+    if since.elapsed().as_secs() >= 5 {
+        log::debug!("renders in {:.1}s: {counts:?}", since.elapsed().as_secs_f32());
+        *since = Instant::now();
+        counts.clear();
+    }
+}
+
 /// The tokio runtime that drives the WebSocket connections. GPUI has its own executor.
 pub fn runtime() -> &'static tokio::runtime::Runtime {
     static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
     RUNTIME.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
+            .worker_threads(4)
             .enable_all()
             .build()
             .expect("starting the tokio runtime")

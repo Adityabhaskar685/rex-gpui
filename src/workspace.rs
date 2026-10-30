@@ -223,8 +223,9 @@ impl Workspace {
                 let control = self.control.clone();
                 let session_id = view.session_id.clone();
                 let pane = cx.new(|cx| TerminalPane::new(control, session_id, block_id.clone(), cx));
-                // Titles show in the tabs and sidebar, so redraw when a pane's changes.
-                cx.observe(&pane, |_, _, cx| cx.notify()).detach();
+                // Titles show in the tabs and sidebar, so redraw when a pane's changes. Not on
+                // every change to the pane, which would redraw every pane with it.
+                cx.subscribe(&pane, |_, _, _: &crate::terminal::InfoChanged, cx| cx.notify()).detach();
                 self.panes.insert(block_id, pane);
             }
         }
@@ -706,6 +707,7 @@ impl Focusable for Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::count_render("workspace");
         if let Some(view) = &self.view {
             window.set_window_title(&format!("{} — Rex", view.label));
         }

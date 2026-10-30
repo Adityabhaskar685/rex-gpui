@@ -53,7 +53,9 @@ pub async fn open_terminal_stream(
         bail!("ticket is {} bytes, expected 16", ticket.len());
     }
 
-    let (tx, rx) = async_channel::unbounded();
+    // Bounded, so the stream is read only as fast as its reader keeps up: a backlog stays
+    // in the server rather than in this process's memory.
+    let (tx, rx) = async_channel::bounded(16);
     let (cancel, cancelled) = oneshot::channel();
     let endpoint = control.endpoint.clone();
     crate::runtime().spawn(async move {
