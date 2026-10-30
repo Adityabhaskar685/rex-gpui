@@ -4,6 +4,10 @@
 //! `XDG_ACTIVATION_TOKEN`, and the compositor shows the app as starting until a window
 //! presents that token, or about 15 seconds pass. GPUI never presents it, so this does,
 //! on GPUI's own Wayland connection and window surface.
+//!
+//! Reading the registry takes one round trip on a queue of our own, which libwayland keeps
+//! apart from GPUI's: events for GPUI's objects stay queued for GPUI. The activation itself
+//! is only sent, not waited for.
 
 use anyhow::{Context as _, Result, bail};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
@@ -13,15 +17,25 @@ use wayland_client::protocol::{wl_registry, wl_surface::WlSurface};
 use wayland_client::{Connection, Dispatch, Proxy, QueueHandle, delegate_noop};
 use wayland_protocols::xdg::activation::v1::client::xdg_activation_v1::XdgActivationV1;
 
-/// Present the launch's activation token for `window`, if there is one.
-pub fn finish_startup(window: &gpui::Window) {
-    let Ok(token) = std::env::var("XDG_ACTIVATION_TOKEN") else {
-        return;
-    };
-    // Programs started from this one shouldn't present the same token.
-    // SAFETY: called on the main thread while it is the only one reading the environment.
+/// Take the launch's activation token out of the environment, so programs started from
+/// this one don't present it too.
+///
+/// # Safety
+///
+/// Changing the environment races with any other thread reading it, so call this first
+/// thing in `main`, before any other thread starts.
+pub unsafe fn take_token() -> Option<String> {
+    let token = std::env::var("XDG_ACTIVATION_TOKEN")
+        .ok()
+        .filter(|t| !t.is_empty());
+    // SAFETY: the caller guarantees no other thread exists yet.
     unsafe { std::env::remove_var("XDG_ACTIVATION_TOKEN") };
-    match activate(window, &token) {
+    token
+}
+
+/// Present the launch's activation token for `window`.
+pub fn finish_startup(window: &gpui::Window, token: &str) {
+    match activate(window, token) {
         Ok(()) => log::info!("presented the launch's activation token"),
         Err(err) => log::warn!("presenting the launch's activation token: {err:#}"),
     }
@@ -61,7 +75,7 @@ fn activate(window: &gpui::Window, token: &str) -> Result<()> {
             display.display.as_ptr() as *mut _
         ))
     };
-    let (globals, mut queue) =
+    let (globals, queue) =
         registry_queue_init::<State>(&connection).context("reading Wayland globals")?;
     let activation: XdgActivationV1 = globals
         .bind(&queue.handle(), 1..=1, ())
@@ -72,8 +86,6 @@ fn activate(window: &gpui::Window, token: &str) -> Result<()> {
     let surface = WlSurface::from_id(&connection, id).context("wrapping the window surface")?;
     activation.activate(token.to_string(), &surface);
     activation.destroy();
-    queue
-        .roundtrip(&mut State)
-        .context("sending the activation")?;
+    connection.flush().context("sending the activation")?;
     Ok(())
 }

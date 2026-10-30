@@ -4,7 +4,9 @@
 //! The server is the real terminal. The local copy only mirrors its output for drawing, so
 //! replies a program asks for, such as cursor reports, are left to the server.
 
+use std::cell::RefCell;
 use std::ops::Range;
+use std::rc::Rc;
 
 use crate::ghostty::{self, CursorShape, RenderState, Rgb, Scroll, ViewportPoint, Width};
 use gpui::{
@@ -32,6 +34,9 @@ pub struct TerminalPane {
     status: Option<String>,
     /// The terminal's colors from the server, which override the app theme's.
     server_theme: Option<Value>,
+    /// Goes up with each new `server_theme`, to know when `theme_cache` is stale.
+    server_theme_version: u64,
+    theme_cache: RefCell<Option<(String, u64, Rc<Theme>)>>,
     /// Scroll-wheel movement too small to make a whole line yet.
     scroll_remainder: f32,
     cell: Option<CellMetrics>,
@@ -69,9 +74,14 @@ pub struct PaneInfo {
 }
 
 impl PaneInfo {
+    /// The directory with the home directory written as `~`, only on a path boundary, so
+    /// `/home/amit` isn't `~it` for a home of `/home/am`.
     fn short_cwd(&self) -> String {
-        match self.cwd.strip_prefix(&self.home) {
-            Some(rest) if !self.home.is_empty() => format!("~{rest}"),
+        let home = self.home.trim_end_matches('/');
+        match self.cwd.strip_prefix(home) {
+            Some(rest) if !home.is_empty() && (rest.is_empty() || rest.starts_with('/')) => {
+                format!("~{rest}")
+            }
             _ => self.cwd.clone(),
         }
     }
@@ -154,7 +164,10 @@ impl TerminalPane {
                                 dirty.store(false, std::sync::atomic::Ordering::Release)
                             }
                             MirrorEvent::Status(status) => this.status = status,
-                            MirrorEvent::Theme(theme) => this.server_theme = Some(theme),
+                            MirrorEvent::Theme(theme) => {
+                                this.server_theme = Some(theme);
+                                this.server_theme_version += 1;
+                            }
                             MirrorEvent::Exited(code) => this.exit_code = Some(code),
                         }
                         cx.notify();
@@ -172,6 +185,8 @@ impl TerminalPane {
             term: mirror.term.clone(),
             status: Some("Connecting…".into()),
             server_theme: None,
+            server_theme_version: 0,
+            theme_cache: RefCell::new(None),
             scroll_remainder: 0.,
             cell: None,
             origin: None,
@@ -220,11 +235,27 @@ impl TerminalPane {
         cx.notify();
     }
 
-    fn theme(&self) -> Theme {
-        match &self.server_theme {
+    /// The terminal's colors, built once per app theme and server theme rather than on
+    /// every frame.
+    fn theme(&self) -> Rc<Theme> {
+        let app_theme = crate::theme::current();
+        let mut cache = self.theme_cache.borrow_mut();
+        if let Some((name, version, theme)) = cache.as_ref()
+            && *name == app_theme.name
+            && *version == self.server_theme_version
+        {
+            return theme.clone();
+        }
+        let theme = Rc::new(match &self.server_theme {
             Some(msg) => Theme::from_message(msg),
             None => Theme::default(),
-        }
+        });
+        *cache = Some((
+            app_theme.name.to_string(),
+            self.server_theme_version,
+            theme.clone(),
+        ));
+        theme
     }
 
     pub fn background(&self) -> Hsla {
@@ -893,7 +924,6 @@ impl TerminalPane {
 #[derive(Clone, Copy, PartialEq)]
 struct CellStyle {
     fg: Hsla,
-    bg: Option<Hsla>,
     bold: bool,
     italic: bool,
     underline: bool,
@@ -962,7 +992,6 @@ impl Frame {
                 }
                 let style = CellStyle {
                     fg,
-                    bg: None,
                     bold: cell.bold,
                     italic: cell.italic,
                     underline: cell.underline,
@@ -1194,6 +1223,19 @@ fn default_palette(ansi: &[u32; 16]) -> [Rgb; 256] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shortens_home_only_on_a_path_boundary() {
+        let info = |cwd: &str| PaneInfo {
+            cwd: cwd.into(),
+            home: "/home/am".into(),
+            ..Default::default()
+        };
+        assert_eq!(info("/home/am").short_cwd(), "~");
+        assert_eq!(info("/home/am/src").short_cwd(), "~/src");
+        assert_eq!(info("/home/amit").short_cwd(), "/home/amit");
+        assert_eq!(info("/tmp").short_cwd(), "/tmp");
+    }
     use crate::rex::data::StreamSplitter;
 
     /// `cargo test --release -- --ignored --nocapture parse_throughput`

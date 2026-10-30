@@ -34,7 +34,7 @@ pub enum Endpoint {
 impl Endpoint {
     /// The local server's Unix socket: `$REX_SOCKET`, else `$XDG_RUNTIME_DIR/rex/server.sock`.
     pub fn local() -> Self {
-        if let Some(path) = std::env::var_os("REX_SOCKET") {
+        if let Some(path) = std::env::var_os("REX_SOCKET").filter(|p| !p.is_empty()) {
             return Self::Unix(path.into());
         }
         let runtime = std::env::var_os("XDG_RUNTIME_DIR")
@@ -69,26 +69,23 @@ impl Endpoint {
             return Ok(vec![Self::Unix(address.into())]);
         }
         let (scheme, rest) = match address.split_once("://") {
-            Some((scheme, rest)) => (Some(scheme), rest),
+            Some((scheme, rest)) => (Some(scheme.to_ascii_lowercase()), rest),
             None => (None, address),
         };
+        let rest = rest.split('/').next().unwrap_or(rest);
         if rest.contains('@') {
             bail!("login-server accounts (ACCOUNT@host) aren't supported yet");
         }
-        let rest = rest.split('/').next().unwrap_or(rest);
-        let (host, port) = match rest.rsplit_once(':') {
-            Some((host, port)) if !host.ends_with(']') || rest.starts_with('[') => (
-                host.to_string(),
-                Some(port.parse::<u16>().context("invalid port")?),
-            ),
-            _ => (rest.to_string(), None),
-        };
+        let (host, port) = split_host_port(rest)?;
+        if host.is_empty() {
+            bail!("no host in {address:?}");
+        }
         let url = |tls, port| Self::Url {
             tls,
             host: host.clone(),
             port,
         };
-        Ok(match (scheme, port) {
+        Ok(match (scheme.as_deref(), port) {
             (Some("https"), port) => vec![url(true, port.unwrap_or(443))],
             (Some("http"), port) => vec![url(false, port.unwrap_or(80))],
             (Some(other), _) => bail!("unsupported scheme {other}://"),
@@ -97,8 +94,17 @@ impl Endpoint {
         })
     }
 
-    /// Open a WebSocket to `path` on the server, asking for `subprotocol`.
+    /// Open a WebSocket to `path` on the server, asking for `subprotocol`. Gives up after
+    /// `CONNECT_TIMEOUT`, so a host that doesn't answer can't hold anything up for long.
     pub async fn connect(&self, path: &str, subprotocol: &str) -> Result<Ws> {
+        tokio::time::timeout(CONNECT_TIMEOUT, self.connect_now(path, subprotocol))
+            .await
+            .with_context(|| {
+                format!("{self} didn't answer within {}s", CONNECT_TIMEOUT.as_secs())
+            })?
+    }
+
+    async fn connect_now(&self, path: &str, subprotocol: &str) -> Result<Ws> {
         let (url, stream): (String, Box<dyn Io>) = match self {
             Self::Unix(socket) => {
                 let stream = UnixStream::connect(socket)
@@ -108,12 +114,21 @@ impl Endpoint {
                 (format!("ws://localhost{path}"), Box::new(stream))
             }
             Self::Url { tls, host, port } => {
-                let stream = TcpStream::connect((host.as_str(), *port))
-                    .await
-                    .with_context(|| format!("connecting to {host}:{port}"))?;
+                let unreachable = || Unreachable {
+                    host: host.clone(),
+                    port: *port,
+                };
+                let stream =
+                    tokio::time::timeout(TCP_TIMEOUT, TcpStream::connect((host.as_str(), *port)))
+                        .await
+                        .map_err(|_| anyhow::Error::new(unreachable()).context("no answer"))?
+                        .map_err(|err| anyhow::Error::new(unreachable()).context(err))?;
                 stream.set_nodelay(true)?;
                 let scheme = if *tls { "wss" } else { "ws" };
-                (format!("{scheme}://{host}:{port}{path}"), Box::new(stream))
+                (
+                    format!("{scheme}://{}:{port}{path}", url_host(host)),
+                    Box::new(stream),
+                )
             }
         };
         let mut request = url.into_client_request()?;
@@ -121,13 +136,68 @@ impl Endpoint {
             "Sec-WebSocket-Protocol",
             HeaderValue::from_str(subprotocol)?,
         );
-        let connecting =
-            tokio_tungstenite::client_async_tls_with_config(request, stream, None, None);
-        let (ws, _) = tokio::time::timeout(std::time::Duration::from_secs(10), connecting)
+        let (ws, _) = tokio_tungstenite::client_async_tls_with_config(request, stream, None, None)
             .await
-            .context("timed out opening the WebSocket")?
             .map_err(describe_ws_error)?;
         Ok(ws)
+    }
+}
+
+/// How long to wait for a server to accept a connection and finish the WebSocket handshake.
+pub const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// How long to wait for a TCP connection alone. A host that doesn't answer in this time
+/// usually doesn't answer at all.
+const TCP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// A host and port that refused or didn't answer a TCP connection, so other addresses for
+/// the same host and port needn't be tried.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Unreachable {
+    pub host: String,
+    pub port: u16,
+}
+
+impl std::fmt::Display for Unreachable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{} is unreachable", url_host(&self.host), self.port)
+    }
+}
+
+impl std::error::Error for Unreachable {}
+
+/// Split `host`, `host:port`, `[v6]`, `[v6]:port`, or a bare IPv6 address such as `::1`.
+fn split_host_port(rest: &str) -> Result<(String, Option<u16>)> {
+    let port = |p: &str| {
+        p.parse::<u16>()
+            .with_context(|| format!("invalid port {p:?}"))
+    };
+    if let Some(bracketed) = rest.strip_prefix('[') {
+        let (host, after) = bracketed
+            .split_once(']')
+            .context("missing ] in IPv6 address")?;
+        return match after.strip_prefix(':') {
+            Some(p) => Ok((host.to_string(), Some(port(p)?))),
+            None if after.is_empty() => Ok((host.to_string(), None)),
+            None => bail!("unexpected {after:?} after the IPv6 address"),
+        };
+    }
+    // More than one colon and no brackets: an IPv6 address without a port.
+    if rest.matches(':').count() > 1 {
+        return Ok((rest.to_string(), None));
+    }
+    match rest.split_once(':') {
+        Some((host, p)) => Ok((host.to_string(), Some(port(p)?))),
+        None => Ok((rest.to_string(), None)),
+    }
+}
+
+/// A host as it goes in a URL: IPv6 addresses in brackets.
+fn url_host(host: &str) -> std::borrow::Cow<'_, str> {
+    if host.contains(':') {
+        format!("[{host}]").into()
+    } else {
+        host.into()
     }
 }
 
@@ -136,7 +206,8 @@ impl std::fmt::Display for Endpoint {
         match self {
             Self::Unix(path) => write!(f, "unix://{}", path.display()),
             Self::Url { tls, host, port } => {
-                write!(f, "{}://{host}:{port}", if *tls { "https" } else { "http" })
+                let scheme = if *tls { "https" } else { "http" };
+                write!(f, "{scheme}://{}:{port}", url_host(host))
             }
         }
     }
@@ -232,5 +303,36 @@ mod tests {
             [url(true, "10.0.0.2", 7297), url(false, "10.0.0.2", 7297)]
         );
         assert!(Endpoint::candidates("https://root@build").is_err());
+    }
+
+    #[test]
+    fn parses_ipv6_and_any_case_scheme() {
+        assert_eq!(
+            Endpoint::candidates("http://[::1]:7297").unwrap(),
+            [url(false, "::1", 7297)]
+        );
+        assert_eq!(
+            Endpoint::candidates("[::1]:7297").unwrap(),
+            [url(true, "::1", 7297), url(false, "::1", 7297)]
+        );
+        assert_eq!(
+            Endpoint::candidates("[fe80::1]").unwrap(),
+            [
+                url(true, "fe80::1", 443),
+                url(true, "fe80::1", 7297),
+                url(false, "fe80::1", 7297)
+            ]
+        );
+        assert_eq!(
+            Endpoint::candidates("::1").unwrap()[0],
+            url(true, "::1", 443)
+        );
+        assert_eq!(
+            Endpoint::candidates("HTTPS://Build.x.ts.net").unwrap(),
+            [url(true, "Build.x.ts.net", 443)]
+        );
+        assert_eq!(url(false, "::1", 7297).to_string(), "http://[::1]:7297");
+        assert!(Endpoint::candidates("[::1").is_err());
+        assert!(Endpoint::candidates("host:notaport").is_err());
     }
 }

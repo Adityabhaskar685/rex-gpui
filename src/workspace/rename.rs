@@ -112,9 +112,18 @@ impl Workspace {
             .items_center()
             .justify_center()
             .bg(gpui::black().opacity(0.45))
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            // A click outside the dialog closes it; one inside stays there.
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.rename = None;
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
             .child(
                 div()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .w(px(360.))
                     .p_4()
                     .flex()

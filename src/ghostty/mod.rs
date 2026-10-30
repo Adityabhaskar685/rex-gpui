@@ -517,9 +517,13 @@ impl RenderState {
             || self.cache.len() != rows as usize;
         if full || dirty != ffi::GHOSTTY_RENDER_STATE_DIRTY_FALSE {
             self.cache.resize_with(rows as usize, Vec::new);
-            let mut iterator = self.rows;
-            self.get(ffi::GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR, &mut iterator);
             unsafe {
+                // Point the row iterator at this frame's rows.
+                ffi::ghostty_render_state_get(
+                    self.state,
+                    ffi::GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR,
+                    &mut self.rows as *mut _ as *mut c_void,
+                );
                 let mut y = 0;
                 while ffi::ghostty_render_state_row_iterator_next(self.rows) && y < self.cache.len()
                 {
@@ -532,11 +536,11 @@ impl RenderState {
                         );
                     }
                     if row_dirty {
-                        let mut cells = self.cells;
+                        // Point the cell iterator at this row's cells.
                         ffi::ghostty_render_state_row_get(
                             self.rows,
                             ffi::GHOSTTY_RENDER_STATE_ROW_DATA_CELLS,
-                            &mut cells as *mut _ as *mut c_void,
+                            &mut self.cells as *mut _ as *mut c_void,
                         );
                         let mut row = std::mem::take(&mut self.cache[y]);
                         row.clear();

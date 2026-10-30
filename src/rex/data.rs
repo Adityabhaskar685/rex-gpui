@@ -1,6 +1,6 @@
 //! Data connections: one WebSocket per block, carrying the block's output stream.
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context as _, Result, anyhow, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use futures_util::{SinkExt, StreamExt};
@@ -9,7 +9,7 @@ use tokio::sync::oneshot;
 use tokio_tungstenite::tungstenite::Message;
 
 use super::control::Control;
-use super::endpoint::Endpoint;
+use super::endpoint::{CONNECT_TIMEOUT, Endpoint};
 
 const SUBPROTOCOL: &str = "rex.data.terminal.v1";
 
@@ -79,19 +79,23 @@ async fn pump(
     let mut ws = endpoint.connect("/api/data", SUBPROTOCOL).await?;
     let mut hello = vec![0x01];
     hello.extend_from_slice(&ticket);
-    ws.send(Message::binary(hello)).await?;
-
-    let welcome = loop {
-        match ws
-            .next()
-            .await
-            .ok_or_else(|| anyhow!("closed during handshake"))??
-        {
-            Message::Binary(bytes) => break bytes,
-            Message::Close(frame) => bail!("closed during handshake: {frame:?}"),
-            _ => continue,
+    let handshake = async {
+        ws.send(Message::binary(hello)).await?;
+        loop {
+            match ws
+                .next()
+                .await
+                .ok_or_else(|| anyhow!("closed during handshake"))??
+            {
+                Message::Binary(bytes) => break anyhow::Ok(bytes),
+                Message::Close(frame) => bail!("closed during handshake: {frame:?}"),
+                _ => continue,
+            }
         }
     };
+    let welcome = tokio::time::timeout(CONNECT_TIMEOUT, handshake)
+        .await
+        .context("the server didn't answer the data handshake")??;
     match welcome.first() {
         Some(0x81) if welcome.len() == 32 => {}
         Some(0x82) => bail!(

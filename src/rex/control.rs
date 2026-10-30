@@ -4,18 +4,18 @@
 //! use runtime-agnostic channels, so GPUI's executor can await them directly.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
-use std::sync::Mutex;
 
 use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message;
 
-use super::endpoint::Endpoint;
+use super::endpoint::{CONNECT_TIMEOUT, Endpoint, Unreachable};
 
 pub const API_REVISION: u64 = 7;
 
@@ -46,7 +46,18 @@ impl Control {
         autostart: bool,
     ) -> Result<(Self, async_channel::Receiver<Event>)> {
         let mut last_error = anyhow!("no address to connect to");
+        // HTTPS and HTTP on the same port are one TCP target: if it didn't answer for one,
+        // don't wait for it again for the other.
+        let mut unreachable = std::collections::HashSet::new();
         for endpoint in endpoints {
+            if let Endpoint::Url { host, port, .. } = endpoint
+                && unreachable.contains(&Unreachable {
+                    host: host.clone(),
+                    port: *port,
+                })
+            {
+                continue;
+            }
             if let (true, Endpoint::Unix(socket)) = (autostart, endpoint)
                 && !socket.exists()
             {
@@ -54,7 +65,13 @@ impl Control {
             }
             match endpoint.connect("/api/control", "rex.control.v1").await {
                 Ok(ws) => return Self::handshake(ws, endpoint.clone()).await,
-                Err(err) => last_error = err.context(format!("connecting to {endpoint}")),
+                Err(err) => {
+                    if let Some(target) = err.chain().find_map(|e| e.downcast_ref::<Unreachable>())
+                    {
+                        unreachable.insert(target.clone());
+                    }
+                    last_error = err.context(format!("connecting to {endpoint}"));
+                }
             }
         }
         Err(last_error)
@@ -75,18 +92,23 @@ impl Control {
                 "version": env!("CARGO_PKG_VERSION"),
             },
         });
-        ws.send(Message::text(hello.to_string())).await?;
-        let welcome: Value = loop {
-            match ws
-                .next()
-                .await
-                .ok_or_else(|| anyhow!("server closed before welcome"))??
-            {
-                Message::Text(text) => break serde_json::from_str(&text)?,
-                Message::Close(frame) => bail!("server refused the connection: {frame:?}"),
-                _ => continue,
+        let exchange = async {
+            ws.send(Message::text(hello.to_string())).await?;
+            loop {
+                match ws
+                    .next()
+                    .await
+                    .ok_or_else(|| anyhow!("server closed before welcome"))??
+                {
+                    Message::Text(text) => break anyhow::Ok(serde_json::from_str::<Value>(&text)?),
+                    Message::Close(frame) => bail!("server refused the connection: {frame:?}"),
+                    _ => continue,
+                }
             }
         };
+        let welcome = tokio::time::timeout(CONNECT_TIMEOUT, exchange)
+            .await
+            .context("the server didn't send a welcome")??;
         if welcome["type"] != "welcome" || welcome["protocol"] != "rex.control.v1" {
             bail!("unexpected welcome: {welcome}");
         }
@@ -163,7 +185,8 @@ impl Control {
     }
 
     /// Queue a request now and return a future for its response. Requests go out in the
-    /// order this is called, which matters for ordered methods such as `client.key`.
+    /// order this is called, which matters for ordered methods such as `client.key`. A
+    /// request that gets no response within `REQUEST_TIMEOUT` fails.
     pub fn request(
         &self,
         method: &str,
@@ -174,12 +197,31 @@ impl Control {
         self.pending.lock().unwrap().insert(id.clone(), tx);
         let request = json!({"type": "request", "id": id, "method": method, "payload": payload});
         let sent = self.outgoing.send(Some(request.to_string()));
-        let method = method.to_string();
-        async move {
+        let (method, pending) = (method.to_string(), self.pending.clone());
+        // The deadline needs tokio's timer, but callers also await this from GPUI's executor,
+        // so wait on the runtime and hand the caller the task, which any executor can await.
+        let waiting = crate::runtime().spawn(async move {
+            // Whatever happens, the request's slot goes once this returns. Normally the
+            // response took it already.
+            let _cleanup = Defer(|| {
+                pending.lock().unwrap().remove(&id);
+            });
             sent.map_err(|_| anyhow!("control connection closed"))?;
-            rx.await
+            tokio::time::timeout(REQUEST_TIMEOUT, rx)
+                .await
+                .map_err(|_| {
+                    anyhow!(
+                        "{method}: no response within {}s",
+                        REQUEST_TIMEOUT.as_secs()
+                    )
+                })?
                 .map_err(|_| anyhow!("control connection closed"))?
                 .with_context(|| format!("{method} failed"))
+        });
+        async move {
+            waiting
+                .await
+                .map_err(|err| anyhow!("request task failed: {err}"))?
         }
     }
 
@@ -223,11 +265,27 @@ impl Control {
 async fn start_server() -> Result<()> {
     let status = tokio::process::Command::new("rex")
         .args(["server", "start"])
-        .status()
+        .kill_on_drop(true)
+        .status();
+    let status = tokio::time::timeout(Duration::from_secs(15), status)
         .await
+        .context("`rex server start` didn't finish within 15s")?
         .context("running `rex server start`")?;
     if !status.success() {
         bail!("`rex server start` exited with {status}");
     }
     Ok(())
+}
+
+/// How long a request may wait for its response. Long enough for the slowest call, reading
+/// a large screen with `terminal.format`.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Runs a closure when dropped.
+struct Defer<F: FnMut()>(F);
+
+impl<F: FnMut()> Drop for Defer<F> {
+    fn drop(&mut self) {
+        (self.0)()
+    }
 }

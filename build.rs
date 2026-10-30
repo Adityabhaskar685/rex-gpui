@@ -38,6 +38,11 @@ fn main() {
         Some(dir) => {
             println!("cargo:rustc-link-search=native={}", dir.display());
             println!("cargo:rustc-link-lib=static=ghostty-vt");
+            // Relink when libghostty-vt is rebuilt.
+            println!(
+                "cargo:rerun-if-changed={}",
+                dir.join("libghostty-vt.a").display()
+            );
         }
         None => {
             for dir in &library.link_paths {
@@ -58,6 +63,11 @@ fn main() {
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()));
     for dir in &library.include_paths {
         builder = builder.clang_arg(format!("-I{}", dir.display()));
+        // Regenerate the bindings when the headers change.
+        println!(
+            "cargo:rerun-if-changed={}",
+            dir.join("ghostty/vt.h").display()
+        );
     }
     let bindings = builder
         .generate()

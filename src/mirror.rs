@@ -119,27 +119,41 @@ async fn run(
         tx,
         dirty,
     };
-    let mut delay = Duration::from_millis(500);
+    const FIRST_DELAY: Duration = Duration::from_millis(500);
+    let mut delay = FIRST_DELAY;
     loop {
-        match stream_once(&pipe).await {
+        let (reason, was_live) = match stream_once(&pipe).await {
             // The block closed, or the pane went away.
             Ok(Ended::Done) => return,
-            Ok(Ended::Lost(reason)) | Err(reason) => {
-                if !pipe.send(MirrorEvent::Status(Some(format!(
-                    "Reconnecting… ({reason:#})"
-                )))) {
-                    return;
-                }
-                tokio::time::sleep(delay).await;
-                delay = (delay * 2).min(Duration::from_secs(10));
-            }
+            Ok(Ended::Lost { reason, was_live }) => (reason, was_live),
+            Err(reason) => (reason, false),
+        };
+        // The server no longer has the block: nothing to reconnect to.
+        if format!("{reason:#}").contains("not_found") {
+            pipe.send(MirrorEvent::Status(Some("Closed".into())));
+            return;
         }
+        // A stream that worked for a while starts the backoff over.
+        if was_live {
+            delay = FIRST_DELAY;
+        }
+        if !pipe.send(MirrorEvent::Status(Some(format!(
+            "Reconnecting… ({reason:#})"
+        )))) {
+            return;
+        }
+        tokio::time::sleep(delay).await;
+        delay = (delay * 2).min(Duration::from_secs(10));
     }
 }
 
 enum Ended {
     Done,
-    Lost(anyhow::Error),
+    Lost {
+        reason: anyhow::Error,
+        /// The stream got as far as showing the terminal before it dropped.
+        was_live: bool,
+    },
 }
 
 /// Follow one data stream from its handshake until it ends.
@@ -161,7 +175,12 @@ async fn stream_once(pipe: &Pipe) -> Result<Ended, anyhow::Error> {
                 pipe.send(MirrorEvent::Status(Some("Closed".into())));
                 return Ok(Ended::Done);
             }
-            DataMessage::Closed(Some(reason)) => return Ok(Ended::Lost(anyhow::anyhow!(reason))),
+            DataMessage::Closed(Some(reason)) => {
+                return Ok(Ended::Lost {
+                    reason: anyhow::anyhow!(reason),
+                    was_live: live,
+                });
+            }
             DataMessage::Bytes(bytes) => {
                 let Some(splitter) = splitter.as_mut() else {
                     continue;
@@ -242,7 +261,10 @@ async fn stream_once(pipe: &Pipe) -> Result<Ended, anyhow::Error> {
             }
         }
     }
-    Ok(Ended::Lost(anyhow::anyhow!("stream ended")))
+    Ok(Ended::Lost {
+        reason: anyhow::anyhow!("stream ended"),
+        was_live: live,
+    })
 }
 
 /// The screen and scrollback as VT text.

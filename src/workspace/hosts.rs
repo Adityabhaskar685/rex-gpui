@@ -112,6 +112,7 @@ impl Workspace {
 
     pub(super) fn toggle_host_menu(&mut self, cx: &mut Context<Self>) {
         self.host_menu = !self.host_menu;
+        self.confirm_remove = None;
         if self.host_menu {
             self.notice = None;
             self.refresh_sessions(cx);
@@ -432,6 +433,7 @@ impl Workspace {
             let is_current = self.current_host.as_ref().is_some_and(|h| h.id == host.id);
             let connect = host.clone();
             let remove = host.id.clone();
+            let confirming = self.confirm_remove.as_ref() == Some(&host.id);
             menu = menu.child(
                 item(SharedString::from(format!("menu-{}", host.id)))
                     .group(SharedString::from(format!("menu-{}", host.id)))
@@ -466,11 +468,19 @@ impl Workspace {
                             .rounded(px(4.))
                             .text_color(rgb(ui().text_faint))
                             .hover(|d| d.text_color(rgb(ui().danger)))
+                            .when(confirming, |d| d.visible().text_color(rgb(ui().danger)))
+                            // The first click asks; a second one removes.
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();
-                                this.remove_host(remove.clone(), cx);
+                                if this.confirm_remove.as_ref() == Some(&remove) {
+                                    this.confirm_remove = None;
+                                    this.remove_host(remove.clone(), cx);
+                                } else {
+                                    this.confirm_remove = Some(remove.clone());
+                                    cx.notify();
+                                }
                             }))
-                            .child("×"),
+                            .child(if confirming { "Remove?" } else { "×" }),
                     ),
             );
         }
@@ -556,9 +566,18 @@ impl Workspace {
             .items_center()
             .justify_center()
             .bg(gpui::black().opacity(0.45))
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            // A click outside the dialog closes it; one inside stays there.
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.add_host = None;
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
             .child(
                 div()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .w(px(420.))
                     .p_4()
                     .flex()

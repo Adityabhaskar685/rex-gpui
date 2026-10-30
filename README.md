@@ -8,8 +8,15 @@ server documents at `/llms.txt`.
 ## Install
 
 Needs Rust, the usual GPUI libraries (Wayland or X11, Vulkan, xkbcommon, fontconfig),
-libclang (for bindgen), and **libghostty-vt**, Ghostty's terminal library. Build that from
-Ghostty's source with Zig:
+pkg-config, OpenSSL headers (for HTTPS to remote servers), libclang (for bindgen), and
+**libghostty-vt**, Ghostty's terminal library. On Debian or Ubuntu:
+
+```sh
+sudo apt install pkg-config libssl-dev libclang-dev libxkbcommon-dev libxkbcommon-x11-dev \
+  libwayland-dev libvulkan-dev libfontconfig-dev libx11-xcb-dev libxcb1-dev
+```
+
+Build libghostty-vt from Ghostty's source with Zig:
 
 ```sh
 git clone https://github.com/ghostty-org/ghostty && cd ghostty
@@ -44,6 +51,8 @@ rex-gpui [-S SERVER] [SESSION]
 rex-gpui [-S SERVER] --check SESSION [COMMAND]
 rex-gpui --list-themes
 ```
+
+`rex-gpui --help` lists every option.
 
 - `SESSION` is a session's label or ID. Without one, the window attaches to the first
   session, or creates one when the server has none.
@@ -211,8 +220,11 @@ set enable-bracketed-paste on
 
 ### Not supported yet
 
-Login-server accounts (`https://ACCOUNT@host`) aren't supported; connect to the account's
-own server instead.
+- Login-server accounts (`https://ACCOUNT@host`); connect to the account's own server
+  instead.
+- Input methods. Keys reach the terminal as key presses, so composed input, such as CJK
+  through an IME or dead keys, doesn't work in terminals or in the app's text fields.
+  Paste works for such text.
 
 ## How it works
 

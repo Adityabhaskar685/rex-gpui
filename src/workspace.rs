@@ -75,6 +75,8 @@ pub struct Workspace {
     /// The block whose pane we last focused, to move keyboard focus when the server's changes.
     focused_block: Option<String>,
     sidebar: bool,
+    /// The title last given to the window, to set it only when it changes.
+    window_title: String,
     host_name: String,
     /// The saved host this window is connected to, or `None` for the local server.
     current_host: Option<Host>,
@@ -85,6 +87,8 @@ pub struct Workspace {
     pending_host_label: Option<String>,
     host_menu: bool,
     add_host: Option<AddHostDialog>,
+    /// The saved host whose remove button was clicked once, waiting for a second click.
+    confirm_remove: Option<String>,
     rename: Option<RenameDialog>,
     theme_menu: Option<ThemeMenu>,
     /// A message about connecting to another host, shown in the host menu.
@@ -110,12 +114,14 @@ impl Workspace {
             panes: HashMap::new(),
             focused_block: None,
             sidebar: false,
+            window_title: String::new(),
             current_host: None,
             home: None,
             hosts: Vec::new(),
             pending_host_label: None,
             host_menu: false,
             add_host: None,
+            confirm_remove: None,
             rename: None,
             theme_menu: None,
             notice: None,
@@ -838,6 +844,11 @@ impl Workspace {
             )
     }
 
+    /// Whether a text field (adding a host, renaming, searching themes) has the keyboard.
+    fn typing(&self) -> bool {
+        self.add_host.is_some() || self.rename.is_some() || self.theme_menu.is_some()
+    }
+
     fn toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
         self.sidebar = !self.sidebar;
         cx.notify();
@@ -853,46 +864,55 @@ impl Focusable for Workspace {
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::count_render("workspace");
-        if let Some(view) = &self.view {
-            window.set_window_title(&format!("{} — Rex", view.label));
+        let title = match &self.view {
+            Some(view) => format!("{} — Rex", view.label),
+            None => "Rex".into(),
+        };
+        if title != self.window_title {
+            window.set_window_title(&title);
+            self.window_title = title;
         }
         let content = div()
             .relative()
             .key_context("Workspace")
             .track_focus(&self.focus_handle)
-            .on_action(cx.listener(Self::new_window))
-            .on_action(cx.listener(Self::new_session))
-            .on_action(cx.listener(Self::next_session))
-            .on_action(cx.listener(Self::toggle_sidebar))
-            .on_action(
-                cx.listener(|this, _: &RenameSession, window, cx| this.open_rename(window, cx)),
-            )
-            .on_action(cx.listener(|this, _: &ClosePane, _, _| {
-                if let Some(id) = this.focused_block_id() {
-                    this.close_block(id);
-                }
-            }))
-            .on_action(cx.listener(|this, _: &ToggleZoom, _, _| {
-                if let Some(id) = this.focused_block_id() {
-                    this.zoom_block(id);
-                }
-            }))
-            .on_action(cx.listener(|this, _: &SplitRight, _, cx| {
-                this.split(this.focused_block_id(), "horizontal", cx)
-            }))
-            .on_action(cx.listener(|this, _: &SplitDown, _, cx| {
-                this.split(this.focused_block_id(), "vertical", cx)
-            }))
-            .on_action(cx.listener(|this, _: &NextWindow, _, _| {
-                this.call("session.focus_next_window", json!({}))
-            }))
-            .on_action(cx.listener(|this, _: &PreviousWindow, _, _| {
-                this.call("session.focus_previous_window", json!({}))
-            }))
-            .on_action(cx.listener(|this, _: &NextPane, _, _| {
-                this.call("session.focus_next_pane", json!({}))
-            }))
-            .on_action(cx.listener(|_, _: &Quit, _, cx| cx.quit()))
+            // While a text field is open, leave the window's shortcuts unhandled, so their
+            // keys reach the field as typing instead of closing panes or quitting.
+            .when(!self.typing(), |d| {
+                d.on_action(cx.listener(Self::new_window))
+                    .on_action(cx.listener(Self::new_session))
+                    .on_action(cx.listener(Self::next_session))
+                    .on_action(cx.listener(Self::toggle_sidebar))
+                    .on_action(cx.listener(|this, _: &RenameSession, window, cx| {
+                        this.open_rename(window, cx)
+                    }))
+                    .on_action(cx.listener(|this, _: &ClosePane, _, _| {
+                        if let Some(id) = this.focused_block_id() {
+                            this.close_block(id);
+                        }
+                    }))
+                    .on_action(cx.listener(|this, _: &ToggleZoom, _, _| {
+                        if let Some(id) = this.focused_block_id() {
+                            this.zoom_block(id);
+                        }
+                    }))
+                    .on_action(cx.listener(|this, _: &SplitRight, _, cx| {
+                        this.split(this.focused_block_id(), "horizontal", cx)
+                    }))
+                    .on_action(cx.listener(|this, _: &SplitDown, _, cx| {
+                        this.split(this.focused_block_id(), "vertical", cx)
+                    }))
+                    .on_action(cx.listener(|this, _: &NextWindow, _, _| {
+                        this.call("session.focus_next_window", json!({}))
+                    }))
+                    .on_action(cx.listener(|this, _: &PreviousWindow, _, _| {
+                        this.call("session.focus_previous_window", json!({}))
+                    }))
+                    .on_action(cx.listener(|this, _: &NextPane, _, _| {
+                        this.call("session.focus_next_pane", json!({}))
+                    }))
+                    .on_action(cx.listener(|_, _: &Quit, _, cx| cx.quit()))
+            })
             .flex()
             .flex_col()
             .size_full()
@@ -1081,7 +1101,18 @@ fn window_frame(content: AnyElement, window: &mut Window) -> AnyElement {
         .when(!tiling.bottom, |d| d.pb(SHADOW))
         .when(!tiling.left, |d| d.pl(SHADOW))
         .when(!tiling.right, |d| d.pr(SHADOW))
-        .on_mouse_move(|_, window, _| window.refresh())
+        .on_mouse_move({
+            // Redraw for the resize cursor only when the edge under the pointer changes,
+            // not on every move.
+            let last_edge = std::cell::Cell::new(None);
+            move |event, window, _| {
+                let size = window.window_bounds().get_bounds().size;
+                let edge = resize_edge(event.position, size);
+                if last_edge.replace(edge) != edge {
+                    window.refresh();
+                }
+            }
+        })
         .on_mouse_down(MouseButton::Left, |event, window, _| {
             let size = window.window_bounds().get_bounds().size;
             if let Some(edge) = resize_edge(event.position, size) {

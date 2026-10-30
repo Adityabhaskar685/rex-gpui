@@ -62,36 +62,66 @@ pub fn runtime() -> &'static tokio::runtime::Runtime {
     })
 }
 
+/// A Linux client for Rex, the terminal multiplexer.
+#[derive(clap::Parser)]
+#[command(version)]
+struct Args {
+    /// The server: `local`, a host label from `rex hosts`, an address such as
+    /// https://build.example.ts.net or 10.0.0.93:7297, or unix:///path/to/server.sock.
+    /// Without it, the host last switched to, else the local server.
+    #[arg(short = 'S', long, env = "REX_SERVER", value_parser = non_empty)]
+    server: Option<String>,
+
+    /// The session to attach to, by label or ID. Without it, the first session, or a new
+    /// one when there are none.
+    session: Option<String>,
+
+    /// Mirror SESSION's focused terminal without a window, type COMMAND if given, and
+    /// compare the copy with the server's own rendering.
+    #[arg(long, num_args = 1..=2, value_names = ["SESSION", "COMMAND"], conflicts_with = "session")]
+    check: Option<Vec<String>>,
+
+    /// Print every theme found and where it came from.
+    #[arg(long, exclusive = true)]
+    list_themes: bool,
+}
+
+fn non_empty(value: &str) -> Result<String, String> {
+    if value.is_empty() {
+        Err("can't be empty".into())
+    } else {
+        Ok(value.to_string())
+    }
+}
+
 fn main() {
+    // SAFETY: first thing in main, before any other thread starts.
+    let activation_token = unsafe { activation::take_token() };
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("rex_gpui=info"))
         .init();
     theme::load();
-    let mut args = std::env::args().skip(1).peekable();
-    let mut server = std::env::var("REX_SERVER").ok().filter(|s| !s.is_empty());
-    let mut positional = Vec::new();
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "-S" | "--server" => server = args.next(),
-            "--list-themes" => {
-                for t in theme::all() {
-                    let kind = match &t.source {
-                        theme::Source::BuiltIn => "built-in".to_string(),
-                        theme::Source::File(path) => path.display().to_string(),
-                    };
-                    println!("{}\t{kind}", t.name);
-                }
-                return;
-            }
-            "-h" | "--help" => {
-                println!(
-                    "usage: rex-gpui [-S SERVER] [SESSION]\n       rex-gpui [-S SERVER] --check SESSION [COMMAND]\n       rex-gpui --list-themes"
-                );
-                return;
-            }
-            _ => positional.push(arg),
-        }
+    // An empty REX_SERVER, as some shells leave behind, means no server was given.
+    if std::env::var_os("REX_SERVER").is_some_and(|v| v.is_empty()) {
+        // SAFETY: still before any other thread starts.
+        unsafe { std::env::remove_var("REX_SERVER") };
     }
-    let target = positional.first().cloned();
+    let args = <Args as clap::Parser>::parse();
+    if args.list_themes {
+        for t in theme::all() {
+            let kind = match &t.source {
+                theme::Source::BuiltIn => "built-in".to_string(),
+                theme::Source::File(path) => path.display().to_string(),
+            };
+            println!("{}\t{kind}", t.name);
+        }
+        return;
+    }
+    let check = args.check.map(|mut values| {
+        let command = (values.len() > 1).then(|| values.remove(1));
+        (values.remove(0), command)
+    });
+    let server = args.server;
+    let target = args.session;
     // Without -S, go back to the saved host this window last used, as a desktop launch has
     // no way to pass one. If it can't be reached, use the local server instead.
     let remembered = match &server {
@@ -132,12 +162,7 @@ fn main() {
     };
     log::info!("connected to {} as {}", control.endpoint, control.client_id);
 
-    if target.as_deref() == Some("--check") {
-        let session = positional
-            .get(1)
-            .cloned()
-            .expect("usage: rex-gpui --check SESSION [COMMAND]");
-        let command = positional.get(2).cloned();
+    if let Some((session, command)) = check {
         let _events = events;
         if let Err(err) = runtime().block_on(check::run(control, &session, command)) {
             eprintln!("check failed: {err:#}");
@@ -176,7 +201,10 @@ fn main() {
             // Present the launch's activation token once the window has drawn, to end the
             // desktop's busy cursor.
             let _ = window.update(cx, |_, window, _| {
-                window.on_next_frame(|window, _| activation::finish_startup(window));
+                if let Some(token) = activation_token {
+                    window
+                        .on_next_frame(move |window, _| activation::finish_startup(window, &token));
+                }
             });
             cx.on_window_closed(|cx| {
                 if cx.windows().is_empty() {

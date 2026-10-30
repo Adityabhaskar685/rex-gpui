@@ -7,6 +7,7 @@ edition = "2024"
 anyhow = "1.0.104"
 async-channel = "2.5.0"
 base64 = "0.23.1"
+clap = { version = "4", features = ["derive", "env"] }
 env_logger = "0.11.11"
 futures-util = "0.3.34"
 gpui = "0.2.2"
