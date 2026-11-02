@@ -44,6 +44,8 @@ pub struct TerminalPane {
     origin: Option<Point<Pixels>>,
     /// Where a left-button drag that selects text started, while it lasts.
     select_anchor: Option<ViewportPoint>,
+    /// The cell of the last mouse event sent to the program, to report moves between cells.
+    last_mouse_cell: Option<(usize, usize)>,
     /// What the terminal showed at the last frame, read without holding its lock.
     render_state: RenderState,
     /// The colors last given to the terminal, and the terminal they were given to, so they
@@ -191,6 +193,7 @@ impl TerminalPane {
             cell: None,
             origin: None,
             select_anchor: None,
+            last_mouse_cell: None,
             render_state: RenderState::new().expect("creating a render state"),
             applied_theme: None,
             track_height: None,
@@ -229,10 +232,63 @@ impl TerminalPane {
                 }
             }
             "child_exited" => self.exit_code = payload["exit_code"].as_i64(),
+            // A program copied text (OSC 52), such as Claude Code after a selection made with
+            // the mouse, or the server's own selection ended. The server can't reach this
+            // machine's clipboard, so put the text there.
+            "clipboard_written" => {
+                self.copy_from_server("com.superlogical.terminal.clipboard_read", payload, cx)
+            }
+            "selection_copied" => {
+                self.copy_from_server("com.superlogical.terminal.blob_read", payload, cx)
+            }
             _ => return,
         }
         cx.emit(InfoChanged);
         cx.notify();
+    }
+
+    /// Put text the server reports as copied on the clipboard. Large text isn't in the event;
+    /// it's read in parts with `read_method` instead.
+    fn copy_from_server(&self, read_method: &'static str, payload: &Value, cx: &mut Context<Self>) {
+        if let Some(text) = payload["text"].as_str() {
+            log::debug!(
+                "copying {} bytes from the terminal to the clipboard",
+                text.len()
+            );
+            cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
+            return;
+        }
+        let (Some(id), true) = (
+            payload["id"].as_u64(),
+            payload["bytes"].as_u64().unwrap_or(0) > 0,
+        ) else {
+            return;
+        };
+        let control = self.control.clone();
+        let (session_id, block_id) = (self.session_id.clone(), self.block_id.clone());
+        cx.spawn(async move |_, cx| {
+            let mut text = String::new();
+            loop {
+                let args = json!({"id": id, "offset": text.len(), "max_bytes": 900_000});
+                let part = match control
+                    .block_call(read_method, &session_id, &block_id, args)
+                    .await
+                {
+                    Ok(part) => part,
+                    Err(err) => {
+                        log::warn!("reading copied text: {err:#}");
+                        return;
+                    }
+                };
+                let data = part["data"].as_str().unwrap_or_default();
+                text.push_str(data);
+                if part["eof"].as_bool().unwrap_or(true) || data.is_empty() {
+                    break;
+                }
+            }
+            let _ = cx.update(|cx| cx.write_to_clipboard(ClipboardItem::new_string(text)));
+        })
+        .detach();
     }
 
     /// The terminal's colors, built once per app theme and server theme rather than on
@@ -470,6 +526,7 @@ impl TerminalPane {
     ) {
         window.focus(&self.focus_handle);
         if self.program_wants_mouse(&event.modifiers) {
+            self.last_mouse_cell = self.cell_at(event.position);
             self.send_mouse(
                 "press",
                 Some(event.button),
@@ -603,6 +660,14 @@ impl TerminalPane {
         let wants_motion =
             event.pressed_button.is_some() || self.term().term.dec_mode(ANY_MOTION_MOUSE);
         if wants_motion && self.program_wants_mouse(&event.modifiers) {
+            // Report a move only when it reaches another cell, as terminals do. Otherwise a
+            // click with a slight wobble reaches the program as a drag, and it may treat it
+            // as one: start a selection or scroll instead of acting on the click.
+            let cell = self.cell_at(event.position);
+            if cell == self.last_mouse_cell {
+                return;
+            }
+            self.last_mouse_cell = cell;
             self.send_mouse(
                 "motion",
                 None,
@@ -622,6 +687,7 @@ impl TerminalPane {
             return;
         }
         if self.program_wants_mouse(&event.modifiers) {
+            self.last_mouse_cell = self.cell_at(event.position);
             self.send_mouse(
                 "release",
                 Some(event.button),
