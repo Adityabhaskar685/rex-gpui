@@ -4,6 +4,8 @@ A community desktop client for [Rex](https://superlogical.com), the terminal mul
 for Linux. It's built on [GPUI](https://gpui.rs), the UI framework behind Zed, and on
 libghostty-vt, Ghostty's terminal core, which is also what the Rex server runs.
 
+![rex-gpui with a session split into three panes](docs/screenshot.png)
+
 > **Not an official Rex client.** This is a community project. It isn't made, endorsed, or
 > supported by Superlogical or the Rex team; please don't send them bug reports about it.
 > It talks to a Rex server through the API the server documents at `/llms.txt`, so it can
@@ -123,6 +125,10 @@ name for one run.
 | ctrl-shift-c / ctrl-shift-v | Copy selection / paste |
 | shift-pageup / shift-pagedown | Scroll back |
 | ctrl-shift-q | Quit |
+
+Ctrl+Shift+K shows them all in the app:
+
+<img src="docs/shortcuts.png" alt="The keyboard shortcuts overlay" width="560">
 
 Every other key goes to the server with `client.key`, so the Lua bindings in your Rex config
 apply, and the server's terminal encodes the key, including the Kitty keyboard protocol.
