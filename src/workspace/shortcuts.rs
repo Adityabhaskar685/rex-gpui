@@ -48,7 +48,15 @@ impl Workspace {
                         .items_center()
                         .justify_between()
                         .gap_4()
-                        .child(div().text_sm().text_color(rgb(ui().text)).child(what))
+                        // A long description wraps; the key caps keep their width.
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .text_sm()
+                                .text_color(rgb(ui().text))
+                                .child(what),
+                        )
                         .child(keycaps(keys)),
                 );
             }

@@ -746,10 +746,7 @@ pub const SHORTCUTS: &[(&str, &str)] = &[
     ("drag", "Select text"),
     ("double-click", "Select a word"),
     ("triple-click", "Select a line"),
-    (
-        "shift-drag",
-        "Select text even when a program has the mouse",
-    ),
+    ("shift-drag", "Select, even when a program has the mouse"),
     ("middle-click", "Paste the primary selection"),
 ];
 
