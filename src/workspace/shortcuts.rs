@@ -57,6 +57,8 @@ impl Workspace {
 
         div()
             .id("shortcuts-backdrop")
+            // Nothing behind an overlay gets the mouse, not even the scroll wheel.
+            .occlude()
             .absolute()
             .top_0()
             .left_0()

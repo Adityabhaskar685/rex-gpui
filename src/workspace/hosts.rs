@@ -507,6 +507,8 @@ impl Workspace {
         // A backdrop that closes the menu when clicked outside it.
         div()
             .id("host-menu-backdrop")
+            // Nothing behind an overlay gets the mouse, not even the scroll wheel.
+            .occlude()
             .absolute()
             .top_0()
             .left_0()
@@ -558,6 +560,8 @@ impl Workspace {
 
         div()
             .id("add-host-backdrop")
+            // Nothing behind an overlay gets the mouse, not even the scroll wheel.
+            .occlude()
             .absolute()
             .top_0()
             .left_0()
