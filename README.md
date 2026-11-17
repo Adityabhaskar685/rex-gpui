@@ -1,9 +1,24 @@
 # rex-gpui
 
-A Linux client for [Rex](https://superlogical.com), the terminal multiplexer, built on
-[GPUI](https://gpui.rs), the UI framework behind Zed. Rex ships a server and CLI for Linux
-but its app only for macOS; this is a desktop app for the same server, using the API the
-server documents at `/llms.txt`.
+A community desktop client for [Rex](https://superlogical.com), the terminal multiplexer,
+for Linux. It's built on [GPUI](https://gpui.rs), the UI framework behind Zed, and on
+libghostty-vt, Ghostty's terminal core, which is also what the Rex server runs.
+
+> **Not an official Rex client.** This is a community project. It isn't made, endorsed, or
+> supported by Superlogical or the Rex team; please don't send them bug reports about it.
+> It talks to a Rex server through the API the server documents at `/llms.txt`, so it can
+> break when that API changes. Rex is Superlogical's product and name.
+
+What it does:
+
+- Attach to sessions on the local Rex server or a remote one (over Tailscale, an SSH
+  tunnel, or HTTP), and switch between sessions and saved hosts from the title bar.
+- Tabs for the session's Rex windows, and its blocks as panes: split, zoom, close, and
+  drag the borders between them to resize.
+- Terminals restored from the server's own Ghostty snapshots, so they match the server
+  exactly, with selection, scrollback, mouse support for programs that use it, and a
+  clipboard that works with programs that copy (OSC 52), such as Claude Code.
+- Built-in and Ghostty themes, a keyboard shortcuts overlay, and a desktop launcher.
 
 ## Install
 
@@ -57,7 +72,7 @@ rex-gpui --list-themes
 - `SESSION` is a session's label or ID. Without one, the window attaches to the first
   session, or creates one when the server has none.
 - `-S SERVER` picks the server, as `rex -S` does: a host label saved with `rex hosts` or
-  the host menu, an address such as `dev93.example.ts.net` or `http://10.0.0.93:7297`, or
+  the host menu, an address such as `devbox.example.ts.net` or `http://10.0.0.93:7297`, or
   a socket as `unix:///path/to/server.sock`. `-S local` is this machine's server, which is
   started if it isn't running. Without `-S`, the window uses the host you last switched to,
   else the local server. `REX_SERVER` sets a default.
@@ -80,6 +95,9 @@ name for one run.
 - **Themes.** The palette button in the title bar opens the theme picker; type to search,
   Enter to apply the first match. See [Themes](#themes).
 - **Sidebar.** The sidebar button lists every session and the current session's tabs.
+- **Resizing panes.** Drag the border between two panes; the sizes are saved on the server.
+- **Shortcuts.** The keyboard button in the title bar, or ctrl-shift-k, lists every
+  shortcut.
 - **Mouse.** Drag to select, which also sets the primary selection; middle-click pastes it.
   Programs that use the mouse get it; hold shift to select anyway. The wheel scrolls back
   through history, or goes to full-screen programs. Drag the scrollbar at the right of a pane,
@@ -101,6 +119,7 @@ name for one run.
 | ctrl-shift-n / ctrl-shift-s | New session / next session |
 | ctrl-shift-b | Toggle the sidebar |
 | ctrl-shift-r | Rename the session |
+| ctrl-shift-k | Show the keyboard shortcuts |
 | ctrl-shift-c / ctrl-shift-v | Copy selection / paste |
 | shift-pageup / shift-pagedown | Scroll back |
 | ctrl-shift-q | Quit |
@@ -140,7 +159,7 @@ run. A terminal whose server sets its own colors (Rex config or `set_theme`) kee
 
 ## Connecting to a Rex server on a remote VM
 
-Say the server runs on a VM called `dev93`. A Rex server listens only on a local Unix
+Say the server runs on a VM called `devbox`. A Rex server listens only on a local Unix
 socket until you give it a network listener, and any client that reaches it can do
 everything its account can, so the network has to say who the client is. Pick one of these.
 
@@ -149,30 +168,30 @@ everything its account can, so the network has to say who the client is. Pick on
 Tailscale identifies the client, so nothing else is needed, and by default only your own
 Tailscale user gets in. Your tailnet needs MagicDNS and HTTPS certificates turned on.
 
-On `dev93`, with Rex installed, either let Rex join the tailnet itself (no Tailscale install
+On `devbox`, with Rex installed, either let Rex join the tailnet itself (no Tailscale install
 needed on the VM):
 
 ```sh
-rex server start --tailscale --tailscale-hostname dev93-rex
+rex server start --tailscale --tailscale-hostname devbox-rex
 rex server status        # prints the sign-in link the first time
 ```
 
-and connect to `dev93-rex.<tailnet>.ts.net`; or, if the VM already runs Tailscale, add a
+and connect to `devbox-rex.<tailnet>.ts.net`; or, if the VM already runs Tailscale, add a
 tailnet listener:
 
 ```sh
 rex server start --extra-listen tailnet://:7297
 ```
 
-and connect to `dev93.<tailnet>.ts.net`. Then, on your machine:
+and connect to `devbox.<tailnet>.ts.net`. Then, on your machine:
 
 ```sh
-rex-gpui -S dev93.<tailnet>.ts.net
+rex-gpui -S devbox.<tailnet>.ts.net
 ```
 
-or open the host menu, choose **Add Remote Host…**, and enter a name (`dev93`) and the
+or open the host menu, choose **Add Remote Host…**, and enter a name (`devbox`) and the
 address. The host is saved to the list that `rex hosts` uses, so afterwards
-`rex-gpui -S dev93` and `rex -S dev93 ls` both work.
+`rex-gpui -S devbox` and `rex -S devbox ls` both work.
 
 To keep the server running across reboots, enable the packaged `rex.service` and add the
 listener in a drop-in with `sudo systemctl edit rex.service`; the unit file
@@ -184,15 +203,15 @@ No Tailscale and no network listener: forward the VM's Rex socket over SSH. The 
 the connection as coming from your own account on the VM, so it lets it in.
 
 ```sh
-# on dev93, once: start a server that stays up without a terminal attached
+# on devbox, once: start a server that stays up without a terminal attached
 rex server start
 
-# on your machine: forward a local socket to dev93's Rex socket (uid 1000 shown)
-ssh -N -L /tmp/rex-dev93.sock:/run/user/1000/rex/server.sock dev93 &
-rex-gpui -S unix:///tmp/rex-dev93.sock
+# on your machine: forward a local socket to devbox's Rex socket (uid 1000 shown)
+ssh -N -L /tmp/rex-devbox.sock:/run/user/1000/rex/server.sock devbox &
+rex-gpui -S unix:///tmp/rex-devbox.sock
 ```
 
-Run `rex server status` on the VM to see its socket path. Remove `/tmp/rex-dev93.sock`
+Run `rex server status` on the VM to see its socket path. Remove `/tmp/rex-devbox.sock`
 before starting the tunnel again. Socket addresses can't be saved as hosts, so use `-S`.
 
 ### Option 3: plain HTTP on a network you control
@@ -200,10 +219,10 @@ before starting the tunnel again. Socket addresses can't be saved as hosts, so u
 Only behind a VPN or firewall you trust: every connection gets full access to the account.
 
 ```sh
-# on dev93
+# on devbox
 rex server start --extra-listen :7297 --allow-anonymous
 # on your machine
-rex-gpui -S http://dev93:7297
+rex-gpui -S http://devbox:7297
 ```
 
 ### If a paste runs line by line on the VM
@@ -242,3 +261,8 @@ set enable-bracketed-paste on
 
 `libc` is pinned to 0.2.189 in `Cargo.lock`: GPUI depends on `xattr` 0.2, which doesn't build
 with newer releases.
+
+## License
+
+[MIT](LICENSE). Rex and the Rex server are Superlogical's and aren't covered by this
+license; libghostty-vt and GPUI have licenses of their own.

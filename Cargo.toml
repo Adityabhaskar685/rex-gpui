@@ -2,6 +2,9 @@
 name = "rex-gpui"
 version = "0.1.0"
 edition = "2024"
+description = "A community Linux desktop client for the Rex terminal multiplexer, built on GPUI and libghostty-vt"
+license = "MIT"
+readme = "README.md"
 
 [dependencies]
 anyhow = "1.0.104"
