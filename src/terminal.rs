@@ -634,6 +634,10 @@ impl TerminalPane {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A pane border is being dragged across this pane: the moves aren't for its program.
+        if crate::workspace::dragging_border() {
+            return;
+        }
         if let (Some(grab), Some(origin)) = (self.scroll_drag, self.origin) {
             if event.pressed_button == Some(MouseButton::Left) {
                 self.scroll_to_thumb(f32::from(event.position.y - origin.y - grab), cx);

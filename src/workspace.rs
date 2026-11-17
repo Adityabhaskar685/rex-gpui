@@ -2,7 +2,10 @@
 //! as tabs, an optional sidebar, and the active window's blocks as rounded cards laid out by
 //! the fractions the server gives.
 
+use std::cell::Cell;
 use std::collections::HashMap;
+use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Result;
 use gpui::{
@@ -14,7 +17,7 @@ use gpui::{
 use serde_json::{Value, json};
 
 use crate::rex::control::{Control, Event};
-use crate::rex::view::{SessionSummary, SessionView, WindowView};
+use crate::rex::view::{Border, SessionSummary, SessionView, WindowView};
 use crate::terminal::TerminalPane;
 
 mod hosts;
@@ -67,6 +70,20 @@ const SHELL: &str = "com.superlogical.terminal.shell";
 /// Colors for the window chrome. Terminals draw with their own theme.
 use crate::theme::ui;
 
+/// Set while a pane border is being dragged, so panes don't take the pointer's moves as
+/// mouse input for their programs.
+static BORDER_DRAG: AtomicBool = AtomicBool::new(false);
+
+pub fn dragging_border() -> bool {
+    BORDER_DRAG.load(Ordering::Relaxed)
+}
+
+struct BorderDrag {
+    border: Border,
+    /// The ratio last sent to the server.
+    sent: Option<f32>,
+}
+
 pub struct Workspace {
     control: Control,
     sessions: Vec<SessionSummary>,
@@ -75,6 +92,9 @@ pub struct Workspace {
     /// The block whose pane we last focused, to move keyboard focus when the server's changes.
     focused_block: Option<String>,
     sidebar: bool,
+    border_drag: Option<BorderDrag>,
+    /// Where the panes' area was last laid out, to turn a pointer position into a fraction.
+    area_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// The title last given to the window, to set it only when it changes.
     window_title: String,
     host_name: String,
@@ -114,6 +134,8 @@ impl Workspace {
             panes: HashMap::new(),
             focused_block: None,
             sidebar: false,
+            border_drag: None,
+            area_bounds: Rc::new(Cell::new(None)),
             window_title: String::new(),
             current_host: None,
             home: None,
@@ -733,7 +755,125 @@ impl Workspace {
                     .child(self.render_card(block_id, pane, focused, zoomed, cx)),
             );
         }
-        area
+
+        // Handles on the borders between panes, in the gaps between the cards.
+        for border in rex_window.borders() {
+            let [x, y, w, h] = border.rect;
+            let dragging = self
+                .border_drag
+                .as_ref()
+                .is_some_and(|d| d.border == border);
+            let id = SharedString::from(format!(
+                "border-{}-{}",
+                border.before_block, border.after_block
+            ));
+            let handle = div()
+                .id(id)
+                .absolute()
+                .flex()
+                .items_center()
+                .justify_center()
+                .map(|d| {
+                    if border.vertical_line {
+                        d.left(relative(border.at))
+                            .ml(px(-GAP / 2.))
+                            .w(px(GAP))
+                            .top(relative(y))
+                            .h(relative(h))
+                            .cursor(CursorStyle::ResizeLeftRight)
+                    } else {
+                        d.top(relative(border.at))
+                            .mt(px(-GAP / 2.))
+                            .h(px(GAP))
+                            .left(relative(x))
+                            .w(relative(w))
+                            .cursor(CursorStyle::ResizeUpDown)
+                    }
+                })
+                .child(
+                    // A line that shows on hover, and while dragging.
+                    div()
+                        .when(border.vertical_line, |d| d.w(px(2.)).h_full())
+                        .when(!border.vertical_line, |d| d.h(px(2.)).w_full())
+                        .rounded_full()
+                        .when(dragging, |d| d.bg(rgb(ui().accent)))
+                        .when(!dragging, |d| d.hover(|d| d.bg(rgb(ui().accent)))),
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        BORDER_DRAG.store(true, Ordering::Relaxed);
+                        this.border_drag = Some(BorderDrag {
+                            border: border.clone(),
+                            sent: None,
+                        });
+                        cx.notify();
+                    }),
+                );
+            area = area.child(handle);
+        }
+
+        // Follow a border drag anywhere in the area, and end it wherever the button comes up.
+        let area_bounds = self.area_bounds.clone();
+        area.child(
+            canvas(
+                move |bounds, _, _| area_bounds.set(Some(bounds)),
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .size_full(),
+        )
+        .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| {
+            if this.border_drag.is_none() {
+                return;
+            }
+            if event.pressed_button != Some(MouseButton::Left) {
+                this.end_border_drag(cx);
+                return;
+            }
+            this.drag_border(event.position);
+        }))
+        .on_mouse_up(
+            MouseButton::Left,
+            cx.listener(|this, _, _, cx| this.end_border_drag(cx)),
+        )
+        .on_mouse_up_out(
+            MouseButton::Left,
+            cx.listener(|this, _, _, cx| this.end_border_drag(cx)),
+        )
+    }
+
+    /// Move the dragged border to `position`, by asking the server for the new split ratio.
+    fn drag_border(&mut self, position: Point<Pixels>) {
+        let (Some(bounds), Some(drag)) = (self.area_bounds.get(), self.border_drag.as_mut()) else {
+            return;
+        };
+        let at = if drag.border.vertical_line {
+            (position.x - bounds.origin.x) / bounds.size.width
+        } else {
+            (position.y - bounds.origin.y) / bounds.size.height
+        };
+        let ratio = drag.border.ratio_at(at);
+        // Pointer moves come faster than a resize is worth; skip ones that barely move it.
+        if drag.sent.is_some_and(|sent| (sent - ratio).abs() < 0.002) {
+            return;
+        }
+        drag.sent = Some(ratio);
+        let payload = json!({
+            "direction": drag.border.direction(),
+            "before_block_id": drag.border.before_block,
+            "after_block_id": drag.border.after_block,
+            "ratio": ratio,
+        });
+        self.call("session.resize_pane", payload);
+    }
+
+    fn end_border_drag(&mut self, cx: &mut Context<Self>) {
+        if self.border_drag.take().is_some() {
+            BORDER_DRAG.store(false, Ordering::Relaxed);
+            cx.notify();
+        }
     }
 
     fn render_card(
@@ -1076,9 +1216,9 @@ fn window_frame(content: AnyElement, window: &mut Window) -> AnyElement {
                         HitboxBehavior::Normal,
                     )
                 },
-                |_, hitbox, window, _| {
+                move |_, hitbox, window, _| {
                     let size = window.window_bounds().get_bounds().size;
-                    let Some(edge) = resize_edge(window.mouse_position(), size) else {
+                    let Some(edge) = resize_edge(window.mouse_position(), size, tiling) else {
                         return;
                     };
                     let style = match edge {
@@ -1107,15 +1247,15 @@ fn window_frame(content: AnyElement, window: &mut Window) -> AnyElement {
             let last_edge = std::cell::Cell::new(None);
             move |event, window, _| {
                 let size = window.window_bounds().get_bounds().size;
-                let edge = resize_edge(event.position, size);
+                let edge = resize_edge(event.position, size, tiling);
                 if last_edge.replace(edge) != edge {
                     window.refresh();
                 }
             }
         })
-        .on_mouse_down(MouseButton::Left, |event, window, _| {
+        .on_mouse_down(MouseButton::Left, move |event, window, _| {
             let size = window.window_bounds().get_bounds().size;
-            if let Some(edge) = resize_edge(event.position, size) {
+            if let Some(edge) = resize_edge(event.position, size, tiling) {
                 window.start_window_resize(edge);
             }
         })
@@ -1123,9 +1263,14 @@ fn window_frame(content: AnyElement, window: &mut Window) -> AnyElement {
         .into_any_element()
 }
 
-fn resize_edge(pos: Point<Pixels>, size: Size<Pixels>) -> Option<ResizeEdge> {
-    let (left, right) = (pos.x < SHADOW, pos.x > size.width - SHADOW);
-    let (top, bottom) = (pos.y < SHADOW, pos.y > size.height - SHADOW);
+/// The window edge or corner under `pos`, for resizing. A side that's tiled, as every side
+/// is when the window is maximized or full screen, has no edge: the window's content reaches
+/// it, and clicks there belong to the content.
+fn resize_edge(pos: Point<Pixels>, size: Size<Pixels>, tiling: gpui::Tiling) -> Option<ResizeEdge> {
+    let left = !tiling.left && pos.x < SHADOW;
+    let right = !tiling.right && pos.x > size.width - SHADOW;
+    let top = !tiling.top && pos.y < SHADOW;
+    let bottom = !tiling.bottom && pos.y > size.height - SHADOW;
     Some(match (top, bottom, left, right) {
         (true, _, true, _) => ResizeEdge::TopLeft,
         (true, _, _, true) => ResizeEdge::TopRight,
