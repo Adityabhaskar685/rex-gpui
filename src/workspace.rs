@@ -22,47 +22,49 @@ use crate::terminal::TerminalPane;
 
 mod hosts;
 mod rename;
+mod shortcuts;
 mod theme_menu;
 use hosts::{AddHostDialog, Host};
 use rename::RenameDialog;
 use theme_menu::ThemeMenu;
 
-actions!(
-    rex,
-    [
-        NewWindow,
-        NewSession,
-        SplitRight,
-        SplitDown,
-        ClosePane,
-        NextWindow,
-        PreviousWindow,
-        NextPane,
-        NextSession,
-        ToggleZoom,
-        ToggleSidebar,
-        RenameSession,
-        Quit,
-    ]
-);
+/// Every window shortcut, once: its keys, the action it runs, and how the shortcuts overlay
+/// describes it. This makes the actions, binds the keys, and fills the overlay, so the three
+/// can't drift apart.
+macro_rules! shortcuts {
+    ($($group:literal => [$($keys:literal: $action:ident, $what:literal;)*])*) => {
+        actions!(rex, [$($($action,)*)*]);
 
-pub fn bind_keys(cx: &mut App) {
-    use gpui::KeyBinding;
-    cx.bind_keys([
-        KeyBinding::new("ctrl-shift-t", NewWindow, None),
-        KeyBinding::new("ctrl-shift-n", NewSession, None),
-        KeyBinding::new("ctrl-shift-d", SplitRight, None),
-        KeyBinding::new("ctrl-shift-e", SplitDown, None),
-        KeyBinding::new("ctrl-shift-w", ClosePane, None),
-        KeyBinding::new("ctrl-tab", NextWindow, None),
-        KeyBinding::new("ctrl-shift-tab", PreviousWindow, None),
-        KeyBinding::new("ctrl-shift-o", NextPane, None),
-        KeyBinding::new("ctrl-shift-s", NextSession, None),
-        KeyBinding::new("ctrl-shift-z", ToggleZoom, None),
-        KeyBinding::new("ctrl-shift-b", ToggleSidebar, None),
-        KeyBinding::new("ctrl-shift-r", RenameSession, None),
-        KeyBinding::new("ctrl-shift-q", Quit, None),
-    ]);
+        pub fn bind_keys(cx: &mut App) {
+            cx.bind_keys([$($(gpui::KeyBinding::new($keys, $action, None),)*)*]);
+        }
+
+        /// The window's shortcuts by group, as `(keys, what they do)`.
+        pub const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[$(($group, &[$(($keys, $what),)*]),)*];
+    };
+}
+
+shortcuts! {
+    "Tabs and panes" => [
+        "ctrl-shift-t": NewWindow, "New tab";
+        "ctrl-tab": NextWindow, "Next tab";
+        "ctrl-shift-tab": PreviousWindow, "Previous tab";
+        "ctrl-shift-d": SplitRight, "Split right";
+        "ctrl-shift-e": SplitDown, "Split down";
+        "ctrl-shift-o": NextPane, "Next pane";
+        "ctrl-shift-z": ToggleZoom, "Zoom pane";
+        "ctrl-shift-w": ClosePane, "Close pane";
+    ]
+    "Sessions" => [
+        "ctrl-shift-n": NewSession, "New session";
+        "ctrl-shift-s": NextSession, "Next session";
+        "ctrl-shift-r": RenameSession, "Rename session";
+    ]
+    "Window" => [
+        "ctrl-shift-b": ToggleSidebar, "Show or hide the sidebar";
+        "ctrl-shift-k": ToggleShortcuts, "Show these shortcuts";
+        "ctrl-shift-q": Quit, "Quit";
+    ]
 }
 
 const SHELL: &str = "com.superlogical.terminal.shell";
@@ -93,6 +95,8 @@ pub struct Workspace {
     focused_block: Option<String>,
     sidebar: bool,
     border_drag: Option<BorderDrag>,
+    /// The keyboard shortcuts overlay is open.
+    shortcuts: bool,
     /// Where the panes' area was last laid out, to turn a pointer position into a fraction.
     area_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// The title last given to the window, to set it only when it changes.
@@ -135,6 +139,7 @@ impl Workspace {
             focused_block: None,
             sidebar: false,
             border_drag: None,
+            shortcuts: false,
             area_bounds: Rc::new(Cell::new(None)),
             window_title: String::new(),
             current_host: None,
@@ -611,6 +616,13 @@ impl Workspace {
                     .children(tabs),
             )
             .child(
+                icon_button("shortcuts", "icons/keyboard.svg", self.shortcuts).on_click(
+                    cx.listener(|this, _, window, cx| {
+                        this.toggle_shortcuts(&ToggleShortcuts, window, cx)
+                    }),
+                ),
+            )
+            .child(
                 icon_button("theme", "icons/palette.svg", self.theme_menu.is_some()).on_click(
                     cx.listener(|this, _, window, cx| this.toggle_theme_menu(window, cx)),
                 ),
@@ -1016,10 +1028,17 @@ impl Render for Workspace {
             .relative()
             .key_context("Workspace")
             .track_focus(&self.focus_handle)
+            // The shortcuts overlay holds the keyboard while it's open; Escape closes it.
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                if this.shortcuts && event.keystroke.key == "escape" {
+                    this.toggle_shortcuts(&ToggleShortcuts, window, cx);
+                }
+            }))
             // While a text field is open, leave the window's shortcuts unhandled, so their
             // keys reach the field as typing instead of closing panes or quitting.
             .when(!self.typing(), |d| {
                 d.on_action(cx.listener(Self::new_window))
+                    .on_action(cx.listener(Self::toggle_shortcuts))
                     .on_action(cx.listener(Self::new_session))
                     .on_action(cx.listener(Self::next_session))
                     .on_action(cx.listener(Self::toggle_sidebar))
@@ -1079,7 +1098,8 @@ impl Render for Workspace {
             })
             .when_some(self.rename.as_ref(), |d, dialog| {
                 d.child(self.render_rename(dialog, cx))
-            });
+            })
+            .when(self.shortcuts, |d| d.child(self.render_shortcuts(cx)));
         window_frame(content.into_any_element(), window)
     }
 }

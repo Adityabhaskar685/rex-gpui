@@ -219,9 +219,9 @@ impl Workspace {
     }
 
     fn open_add_host(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) {
-        let label = cx.new(|cx| TextField::new("dev93", cx));
+        let label = cx.new(|cx| TextField::new("devbox", cx));
         let address =
-            cx.new(|cx| TextField::new("dev93.tailnet.ts.net or http://10.0.0.93:7297", cx));
+            cx.new(|cx| TextField::new("devbox.tailnet.ts.net or http://10.0.0.5:7297", cx));
         let subscriptions = [&label, &address]
             .into_iter()
             .map(|field| {

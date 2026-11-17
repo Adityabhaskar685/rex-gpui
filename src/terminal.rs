@@ -736,6 +736,23 @@ impl TerminalPane {
     }
 }
 
+/// The keys and mouse actions a terminal pane handles itself, for the shortcuts overlay.
+/// Keep this beside `on_key_down` and the mouse handlers, which implement them.
+pub const SHORTCUTS: &[(&str, &str)] = &[
+    ("ctrl-shift-c", "Copy the selection"),
+    ("ctrl-shift-v", "Paste"),
+    ("shift-pageup", "Scroll back a page"),
+    ("shift-pagedown", "Scroll forward a page"),
+    ("drag", "Select text"),
+    ("double-click", "Select a word"),
+    ("triple-click", "Select a line"),
+    (
+        "shift-drag",
+        "Select text even when a program has the mouse",
+    ),
+    ("middle-click", "Paste the primary selection"),
+];
+
 /// DEC private modes the pane checks.
 const BRACKETED_PASTE: u16 = 2004;
 const ANY_MOTION_MOUSE: u16 = 1003;
