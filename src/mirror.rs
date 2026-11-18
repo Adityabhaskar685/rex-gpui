@@ -14,7 +14,7 @@ use std::time::Duration;
 use anyhow::Result;
 use serde_json::{Value, json};
 
-use crate::ghostty::Terminal;
+use crate::ghostty::{Search, Terminal};
 use crate::rex::control::Control;
 use crate::rex::data::{self, DataMessage, StreamItem, StreamSplitter};
 
@@ -24,6 +24,10 @@ pub struct Shared {
     /// Goes up whenever `term` is replaced by a new one, which loses settings such as the
     /// default colors, so the pane knows to apply them again.
     pub generation: u64,
+    /// The pane's search, while its search bar is open, with the `generation` of the
+    /// terminal it searches. It lives behind the same lock as the terminal, as libghostty-vt
+    /// requires.
+    pub search: Option<(u64, Search)>,
 }
 
 pub type SharedTerm = Arc<Mutex<Shared>>;
@@ -61,6 +65,7 @@ pub fn start(control: Control, session_id: String, block_id: String) -> Mirror {
     let term: SharedTerm = Arc::new(Mutex::new(Shared {
         term,
         generation: 0,
+        search: None,
     }));
     let (tx, events) = async_channel::unbounded();
     let dirty = Arc::new(AtomicBool::new(false));

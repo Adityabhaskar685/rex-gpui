@@ -1,10 +1,12 @@
 //! The keyboard shortcuts overlay, opened with ctrl-shift-k or the title bar's keyboard
-//! button. It lists the window's shortcuts from `SHORTCUTS` and the terminal's from
-//! `terminal::SHORTCUTS`, so it always matches what the keys do.
+//! button. It lists the keys in effect from `keymap`, with any changes from the
+//! keybindings file, and the terminal's mouse actions from `terminal::MOUSE_SHORTCUTS`, so
+//! it always matches what the keys do.
 
 use gpui::{Context, FontWeight, MouseButton, Window, div, prelude::*, px, rgb};
 
-use super::{SHORTCUTS, ToggleShortcuts, Workspace};
+use super::Workspace;
+use crate::keymap::{self, ACTIONS, ToggleShortcuts};
 use crate::theme::ui;
 
 impl Workspace {
@@ -27,10 +29,22 @@ impl Workspace {
     }
 
     pub(super) fn render_shortcuts(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let groups = SHORTCUTS
-            .iter()
-            .copied()
-            .chain([("Terminal", crate::terminal::SHORTCUTS)]);
+        let keymap = keymap::current();
+        // Each group's entries, as (keys, what they do).
+        type Entries<'a> = Vec<(Vec<String>, &'a str)>;
+        let mut groups: Vec<(&str, Entries)> = Vec::new();
+        for (action, keys) in ACTIONS.iter().zip(&keymap.keys) {
+            let entry = (keys.clone(), action.what);
+            match groups.iter_mut().find(|(group, _)| *group == action.group) {
+                Some((_, entries)) => entries.push(entry),
+                None => groups.push((action.group, vec![entry])),
+            }
+        }
+        if let Some((_, entries)) = groups.iter_mut().find(|(group, _)| *group == "Terminal") {
+            for &(mouse, what) in crate::terminal::MOUSE_SHORTCUTS {
+                entries.push((vec![mouse.to_string()], what));
+            }
+        }
         let mut columns = div().flex().flex_row().flex_wrap().gap_x_8().gap_y_4();
         for (group, entries) in groups {
             let mut list = div().w(px(300.)).flex().flex_col().gap_1().child(
@@ -41,7 +55,7 @@ impl Workspace {
                     .text_color(rgb(ui().text_faint))
                     .child(group),
             );
-            for &(keys, what) in entries {
+            for (keys, what) in entries {
                 list = list.child(
                     div()
                         .flex()
@@ -57,11 +71,22 @@ impl Workspace {
                                 .text_color(rgb(ui().text))
                                 .child(what),
                         )
-                        .child(keycaps(keys)),
+                        .child(bindings(&keys)),
                 );
             }
             columns = columns.child(list);
         }
+        let file = keymap::path().display().to_string();
+        let file = std::env::var("HOME")
+            .ok()
+            .and_then(|home| file.strip_prefix(&home).map(|rest| format!("~{rest}")))
+            .unwrap_or(file);
+        let problems = keymap.problems.iter().map(|problem| {
+            div()
+                .text_xs()
+                .text_color(rgb(ui().danger))
+                .child(format!("Keybindings: {problem}"))
+        });
 
         div()
             .id("shortcuts-backdrop")
@@ -111,10 +136,29 @@ impl Workspace {
                         div()
                             .text_xs()
                             .text_color(rgb(ui().text_faint))
-                            .child("Other keys go to the program in the terminal, and to your Rex config's key bindings."),
-                    ),
+                            .child(format!("Other keys go to the program in the terminal, and to your Rex config's key bindings. Change these in {file} and restart rex-gpui.")),
+                    )
+                    .children(problems),
             )
     }
+}
+
+/// An action's keys as key caps, one binding after another; a dash when it has none.
+fn bindings(keys: &[String]) -> impl IntoElement {
+    let mut row = div().flex().flex_none().items_center().gap_1();
+    if keys.is_empty() {
+        return row.text_xs().text_color(rgb(ui().text_faint)).child("—");
+    }
+    for (i, binding) in keys.iter().enumerate() {
+        if i > 0 {
+            row = row.child(div().text_xs().text_color(rgb(ui().text_faint)).child("/"));
+        }
+        // A sequence such as `ctrl-a z` shows each key's caps in turn.
+        for keys in binding.split_whitespace() {
+            row = row.child(keycaps(keys));
+        }
+    }
+    row
 }
 
 /// Keys such as `ctrl-shift-t` drawn as key caps: Ctrl, Shift, T.
@@ -143,10 +187,12 @@ fn caps(keys: &str) -> Vec<String> {
     let mut caps = Vec::new();
     let mut rest = keys;
     while let Some((first, after)) = rest.split_once('-') {
-        let modifier = match first {
+        let modifier = match first.to_ascii_lowercase().as_str() {
             "ctrl" => "Ctrl",
             "shift" => "Shift",
             "alt" => "Alt",
+            "super" | "cmd" | "win" => "Super",
+            "fn" => "Fn",
             _ => break,
         };
         caps.push(modifier.to_string());
@@ -180,5 +226,8 @@ mod tests {
         assert_eq!(caps("ctrl-tab"), ["Ctrl", "Tab"]);
         assert_eq!(caps("double-click"), ["Double-click"]);
         assert_eq!(caps("shift-drag"), ["Shift", "Drag"]);
+        assert_eq!(caps("ctrl--"), ["Ctrl", "-"]);
+        assert_eq!(caps("ctrl-="), ["Ctrl", "="]);
+        assert_eq!(caps("Super-Enter"), ["Super", "Enter"]);
     }
 }

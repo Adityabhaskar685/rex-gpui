@@ -8,6 +8,7 @@ mod activation;
 mod assets;
 mod check;
 mod ghostty;
+mod keymap;
 mod keys;
 mod mirror;
 mod rex;
@@ -174,7 +175,7 @@ fn main() {
     Application::new()
         .with_assets(assets::Assets)
         .run(move |cx: &mut App| {
-            workspace::bind_keys(cx);
+            keymap::bind_keys(cx);
             let bounds = Bounds::centered(None, size(px(1100.), px(700.)), cx);
             let window = cx
                 .open_window(
