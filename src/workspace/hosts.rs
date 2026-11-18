@@ -181,7 +181,10 @@ impl Workspace {
                     this.notice = None;
                     this.host_menu = false;
                     this.add_host = None;
-                    this.start(events, None, cx);
+                    // A reconnect to the old host would be for nothing now.
+                    this.reconnecting = None;
+                    this._reconnect = gpui::Task::ready(());
+                    this.start(events, None, false, cx);
                     cx.notify();
                 }
                 Err(err) => {

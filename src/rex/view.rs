@@ -166,9 +166,79 @@ impl WindowView {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Direction {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+/// The pane next to `from` in `direction`, among `blocks` placed as `[x, y, w, h]`
+/// fractions: the nearest one that lines up with it, sharing the most of its edge. `None`
+/// at the edge of the window.
+pub fn neighbor(blocks: &[(String, [f32; 4])], from: &str, direction: Direction) -> Option<String> {
+    const EPSILON: f32 = 0.001;
+    let [fx, fy, fw, fh] = blocks.iter().find(|(id, _)| id == from)?.1;
+    let overlap = |a0: f32, a1: f32, b0: f32, b1: f32| a1.min(b1) - a0.max(b0);
+    blocks
+        .iter()
+        .filter(|(id, _)| id != from)
+        .filter_map(|(id, [x, y, w, h])| {
+            // How far away it is, and how much of the edge facing it they share.
+            let (gap, shared) = match direction {
+                Direction::Left => (fx - (x + w), overlap(fy, fy + fh, *y, y + h)),
+                Direction::Right => (x - (fx + fw), overlap(fy, fy + fh, *y, y + h)),
+                Direction::Up => (fy - (y + h), overlap(fx, fx + fw, *x, x + w)),
+                Direction::Down => (y - (fy + fh), overlap(fx, fx + fw, *x, x + w)),
+            };
+            (gap > -EPSILON && shared > EPSILON).then_some((id, gap, shared))
+        })
+        .min_by(|a, b| a.1.total_cmp(&b.1).then(b.2.total_cmp(&a.2)))
+        .map(|(id, ..)| id.clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finds_the_pane_in_a_direction() {
+        // A left half, and a right half split into a top and a bottom.
+        let blocks = vec![
+            ("left".to_string(), [0.0, 0.0, 0.5, 1.0]),
+            ("top".to_string(), [0.5, 0.0, 0.5, 0.4]),
+            ("bottom".to_string(), [0.5, 0.4, 0.5, 0.6]),
+        ];
+        let go = |from, direction| neighbor(&blocks, from, direction);
+        // The left half touches both; the bottom shares more of its edge.
+        assert_eq!(go("left", Direction::Right).as_deref(), Some("bottom"));
+        assert_eq!(go("top", Direction::Left).as_deref(), Some("left"));
+        assert_eq!(go("top", Direction::Down).as_deref(), Some("bottom"));
+        assert_eq!(go("bottom", Direction::Up).as_deref(), Some("top"));
+        assert_eq!(go("left", Direction::Left), None);
+        assert_eq!(go("left", Direction::Up), None);
+        assert_eq!(go("top", Direction::Right), None);
+        assert_eq!(go("nowhere", Direction::Left), None);
+    }
+
+    #[test]
+    fn prefers_the_nearest_pane() {
+        // Three columns: moving right from the first lands on the middle one.
+        let blocks = vec![
+            ("a".to_string(), [0.0, 0.0, 0.3, 1.0]),
+            ("b".to_string(), [0.3, 0.0, 0.3, 1.0]),
+            ("c".to_string(), [0.6, 0.0, 0.4, 1.0]),
+        ];
+        assert_eq!(
+            neighbor(&blocks, "a", Direction::Right).as_deref(),
+            Some("b")
+        );
+        assert_eq!(
+            neighbor(&blocks, "c", Direction::Left).as_deref(),
+            Some("b")
+        );
+    }
 
     #[test]
     fn finds_borders_and_ratios() {

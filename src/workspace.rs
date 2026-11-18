@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 
 use crate::keymap::*;
 use crate::rex::control::{Control, Event};
-use crate::rex::view::{Border, SessionSummary, SessionView, WindowView};
+use crate::rex::view::{self, Border, Direction, SessionSummary, SessionView, WindowView};
 use crate::terminal::TerminalPane;
 
 mod hosts;
@@ -29,6 +29,12 @@ use hosts::{AddHostDialog, Host};
 use rename::RenameDialog;
 use switcher::Switcher;
 use theme_menu::ThemeMenu;
+
+/// How long to wait before the first attempt to reconnect, and at most between attempts.
+const RECONNECT_FIRST_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
+const RECONNECT_MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(8);
+/// How often to check that a remote server still answers.
+const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
 
 const SHELL: &str = "com.superlogical.terminal.shell";
 
@@ -80,6 +86,11 @@ pub struct Workspace {
     theme_menu: Option<ThemeMenu>,
     /// The quick switcher, while it's open.
     switcher: Option<Switcher>,
+    /// Why the window is reconnecting, while the connection to the server is down.
+    reconnecting: Option<String>,
+    _reconnect: Task<()>,
+    /// Checks that a remote server still answers.
+    _heartbeat: Task<()>,
     /// A message about connecting to another host, shown in the host menu.
     notice: Option<String>,
     error: Option<String>,
@@ -117,12 +128,15 @@ impl Workspace {
             rename: None,
             theme_menu: None,
             switcher: None,
+            reconnecting: None,
+            _reconnect: Task::ready(()),
+            _heartbeat: Task::ready(()),
             notice: None,
             error: None,
             focus_handle: cx.focus_handle(),
             _events: Task::ready(()),
         };
-        this.start(events, target, cx);
+        this.start(events, target, false, cx);
         // Show the saved host's name, when the window was started with one's label.
         if let Some(label) = host_label.filter(|_| !this.control.endpoint.is_local()) {
             this.pending_host_label = Some(label);
@@ -131,11 +145,14 @@ impl Workspace {
         this
     }
 
-    /// Follow `self.control`'s events and attach to `target`, or the first session.
+    /// Follow `self.control`'s events and attach to `target`, or the first session. A
+    /// `target` that isn't there is made, unless `rejoin`: then it's a session this window
+    /// had before a reconnect, which may be gone, and the first session will do.
     fn start(
         &mut self,
         events: async_channel::Receiver<Event>,
         target: Option<String>,
+        rejoin: bool,
         cx: &mut Context<Self>,
     ) {
         self._events = cx.spawn(async move |this, cx| {
@@ -147,11 +164,9 @@ impl Workspace {
                     return;
                 }
             }
-            let _ = this.update(cx, |this, cx| {
-                this.error = Some("Lost the connection to the Rex server".into());
-                cx.notify();
-            });
+            let _ = this.update(cx, |this, cx| this.reconnect(cx));
         });
+        self._heartbeat = self.heartbeat(cx);
 
         let control = self.control.clone();
         cx.spawn(async move |this, cx| {
@@ -160,8 +175,11 @@ impl Workspace {
                     .call("session.attach_all", json!({"event_scope": "session"}))
                     .await?;
                 let sessions = list_sessions(&control).await?;
-                let session_id = match pick_session(&sessions, target.as_deref()) {
+                let found = pick_session(&sessions, target.as_deref())
+                    .or_else(|| rejoin.then(|| pick_session(&sessions, None)).flatten());
+                let session_id = match found {
                     Some(id) => id,
+                    None if rejoin => create_session(&control, None).await?,
                     None => create_session(&control, target.as_deref()).await?,
                 };
                 anyhow::Ok(session_id)
@@ -176,6 +194,102 @@ impl Workspace {
             });
         })
         .detach();
+    }
+
+    /// The connection to the server ended: connect again to the same address, more and more
+    /// slowly, and come back to the same session. The old panes stay on screen meanwhile;
+    /// they hold the old connection, so they're replaced once the session is attached again.
+    fn reconnect(&mut self, cx: &mut Context<Self>) {
+        self._heartbeat = Task::ready(());
+        let endpoint = self.control.endpoint.clone();
+        let session = self.session_id();
+        let name = self.host_title();
+        self.reconnecting = Some(format!("Lost the connection to {name}. Reconnecting…"));
+        cx.notify();
+        self._reconnect = cx.spawn(async move |this, cx| {
+            let mut delay = RECONNECT_FIRST_DELAY;
+            loop {
+                cx.background_executor().timer(delay).await;
+                let target = endpoint.clone();
+                // Don't start a local server that was stopped on purpose; wait for it.
+                let result = crate::runtime()
+                    .spawn(async move { Control::connect(&[target], false).await })
+                    .await
+                    .map_err(anyhow::Error::from)
+                    .and_then(|result| result);
+                let done = this.update(cx, |this, cx| match result {
+                    Ok((control, events)) => {
+                        log::info!("reconnected to {}", control.endpoint);
+                        let old = std::mem::replace(&mut this.control, control);
+                        old.close();
+                        this.reconnecting = None;
+                        this.error = None;
+                        this.start(events, session.clone(), true, cx);
+                        cx.notify();
+                        true
+                    }
+                    Err(err) => {
+                        log::info!("reconnecting to {endpoint}: {err:#}");
+                        this.reconnecting = Some(format!(
+                            "Lost the connection to {name}. Trying again in {}s…",
+                            (delay * 2).min(RECONNECT_MAX_DELAY).as_secs()
+                        ));
+                        cx.notify();
+                        false
+                    }
+                });
+                // The window closed, or the connection is back.
+                if done.unwrap_or(true) {
+                    return;
+                }
+                delay = (delay * 2).min(RECONNECT_MAX_DELAY);
+            }
+        });
+    }
+
+    /// A connection over the network can die without closing, as when the laptop sleeps or
+    /// changes networks; nothing arrives, and nothing says it won't. Ask the server something
+    /// small now and then, and reconnect when it doesn't answer. A local socket can't die
+    /// that way.
+    fn heartbeat(&self, cx: &mut Context<Self>) -> Task<()> {
+        if self.control.endpoint.is_local() {
+            return Task::ready(());
+        }
+        let control = self.control.clone();
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(HEARTBEAT_INTERVAL).await;
+                if let Err(err) = control.call("session.list", json!({})).await {
+                    log::warn!("the server stopped answering: {err:#}");
+                    let _ = this.update(cx, |this, cx| {
+                        // Stop following the dead connection's events, which may never end.
+                        this._events = Task::ready(());
+                        this.reconnect(cx);
+                    });
+                    return;
+                }
+            }
+        })
+    }
+
+    fn render_reconnecting(&self, message: String) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap_2()
+            .mx_2()
+            .mb_1()
+            .px_3()
+            .h(px(28.))
+            .rounded(px(8.))
+            .border_1()
+            .border_color(rgb(ui().danger))
+            .bg(rgb(ui().menu))
+            .text_xs()
+            .text_color(rgb(ui().text))
+            .child(icon("icons/server.svg", 14., ui().danger))
+            .child(message)
     }
 
     fn session_id(&self) -> Option<String> {
@@ -453,6 +567,19 @@ impl Workspace {
             .filter(|s| Some(&s.session_id) != current.as_ref())
         {
             self.attach(next.session_id.clone(), cx);
+        }
+    }
+
+    /// Focus the pane next to the focused one in `direction`, when there is one.
+    fn focus_toward(&self, direction: Direction) {
+        let Some(window) = self.active_window() else {
+            return;
+        };
+        let Some(from) = &window.focused_block_id else {
+            return;
+        };
+        if let Some(block_id) = view::neighbor(&window.placed_blocks(), from, direction) {
+            self.call("session.focus_block", json!({"block_id": block_id}));
         }
     }
 
@@ -1007,100 +1134,116 @@ impl Render for Workspace {
             window.set_window_title(&title);
             self.window_title = title;
         }
-        let content = div()
-            .relative()
-            .key_context("Workspace")
-            .track_focus(&self.focus_handle)
-            // The shortcuts overlay holds the keyboard while it's open; Escape closes it.
-            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
-                if this.shortcuts && event.keystroke.key == "escape" {
-                    this.toggle_shortcuts(&ToggleShortcuts, window, cx);
-                }
-                if this.switcher.is_some() {
-                    this.on_switcher_key(event, cx);
-                }
-            }))
-            // The switcher's own key closes it again, even while its field has the keyboard.
-            .on_action(cx.listener(Self::toggle_switcher))
-            // While a text field is open, leave the window's shortcuts unhandled, so their
-            // keys reach the field as typing instead of closing panes or quitting.
-            .when(!self.typing(), |d| {
-                d.on_action(cx.listener(Self::new_window))
-                    .on_action(cx.listener(Self::toggle_shortcuts))
-                    .on_action(cx.listener(Self::new_session))
-                    .on_action(cx.listener(Self::next_session))
-                    .on_action(cx.listener(Self::toggle_sidebar))
-                    .on_action(cx.listener(|this, _: &RenameSession, window, cx| {
-                        this.open_rename(window, cx)
-                    }))
-                    .on_action(cx.listener(|this, _: &ClosePane, _, _| {
-                        if let Some(id) = this.focused_block_id() {
-                            this.close_block(id);
-                        }
-                    }))
-                    .on_action(cx.listener(|this, _: &ToggleZoom, _, _| {
-                        if let Some(id) = this.focused_block_id() {
-                            this.zoom_block(id);
-                        }
-                    }))
-                    .on_action(cx.listener(|this, _: &SplitRight, _, cx| {
-                        this.split(this.focused_block_id(), "horizontal", cx)
-                    }))
-                    .on_action(cx.listener(|this, _: &SplitDown, _, cx| {
-                        this.split(this.focused_block_id(), "vertical", cx)
-                    }))
-                    .on_action(cx.listener(|this, _: &NextWindow, _, _| {
-                        this.call("session.focus_next_window", json!({}))
-                    }))
-                    .on_action(cx.listener(|this, _: &PreviousWindow, _, _| {
-                        this.call("session.focus_previous_window", json!({}))
-                    }))
-                    .on_action(cx.listener(|this, _: &NextPane, _, _| {
-                        this.call("session.focus_next_pane", json!({}))
-                    }))
-                    .on_action(cx.listener(|this, _: &IncreaseFontSize, _, cx| {
-                        this.set_font_size(crate::terminal::font_size_f32() + 1., cx)
-                    }))
-                    .on_action(cx.listener(|this, _: &DecreaseFontSize, _, cx| {
-                        this.set_font_size(crate::terminal::font_size_f32() - 1., cx)
-                    }))
-                    .on_action(cx.listener(|this, _: &ResetFontSize, _, cx| {
-                        crate::terminal::reset_font_size();
-                        this.redraw_panes(cx);
-                    }))
-                    .on_action(cx.listener(|_, _: &Quit, _, cx| cx.quit()))
-            })
-            .flex()
-            .flex_col()
-            .size_full()
-            .bg(rgb(ui().window))
-            .text_color(rgb(ui().text))
-            .font_family("Ubuntu Sans")
-            .child(self.render_titlebar(window, cx))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .flex_1()
-                    .min_h(px(0.))
-                    .pl(px(4.))
-                    .when(self.sidebar, |d| d.child(self.render_sidebar(cx)))
-                    .child(self.render_window(window, cx)),
-            )
-            .when(self.host_menu, |d| d.child(self.render_host_menu(cx)))
-            .when_some(self.theme_menu.as_ref(), |d, menu| {
-                d.child(self.render_theme_menu(menu, cx))
-            })
-            .when_some(self.add_host.as_ref(), |d, dialog| {
-                d.child(self.render_add_host(dialog, cx))
-            })
-            .when_some(self.rename.as_ref(), |d, dialog| {
-                d.child(self.render_rename(dialog, cx))
-            })
-            .when(self.switcher.is_some(), |d| {
-                d.child(self.render_switcher(cx))
-            })
-            .when(self.shortcuts, |d| d.child(self.render_shortcuts(cx)));
+        let content =
+            div()
+                .relative()
+                .key_context("Workspace")
+                .track_focus(&self.focus_handle)
+                // The shortcuts overlay holds the keyboard while it's open; Escape closes it.
+                .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                    if this.shortcuts && event.keystroke.key == "escape" {
+                        this.toggle_shortcuts(&ToggleShortcuts, window, cx);
+                    }
+                    if this.switcher.is_some() {
+                        this.on_switcher_key(event, cx);
+                    }
+                }))
+                // The switcher's own key closes it again, even while its field has the keyboard.
+                .on_action(cx.listener(Self::toggle_switcher))
+                // While a text field is open, leave the window's shortcuts unhandled, so their
+                // keys reach the field as typing instead of closing panes or quitting.
+                .when(!self.typing(), |d| {
+                    d.on_action(cx.listener(Self::new_window))
+                        .on_action(cx.listener(Self::toggle_shortcuts))
+                        .on_action(cx.listener(Self::new_session))
+                        .on_action(cx.listener(Self::next_session))
+                        .on_action(cx.listener(Self::toggle_sidebar))
+                        .on_action(cx.listener(|this, _: &RenameSession, window, cx| {
+                            this.open_rename(window, cx)
+                        }))
+                        .on_action(cx.listener(|this, _: &ClosePane, _, _| {
+                            if let Some(id) = this.focused_block_id() {
+                                this.close_block(id);
+                            }
+                        }))
+                        .on_action(cx.listener(|this, _: &ToggleZoom, _, _| {
+                            if let Some(id) = this.focused_block_id() {
+                                this.zoom_block(id);
+                            }
+                        }))
+                        .on_action(cx.listener(|this, _: &SplitRight, _, cx| {
+                            this.split(this.focused_block_id(), "horizontal", cx)
+                        }))
+                        .on_action(cx.listener(|this, _: &SplitDown, _, cx| {
+                            this.split(this.focused_block_id(), "vertical", cx)
+                        }))
+                        .on_action(cx.listener(|this, _: &NextWindow, _, _| {
+                            this.call("session.focus_next_window", json!({}))
+                        }))
+                        .on_action(cx.listener(|this, _: &PreviousWindow, _, _| {
+                            this.call("session.focus_previous_window", json!({}))
+                        }))
+                        .on_action(cx.listener(|this, _: &NextPane, _, _| {
+                            this.call("session.focus_next_pane", json!({}))
+                        }))
+                        .on_action(cx.listener(|this, _: &FocusLeft, _, _| {
+                            this.focus_toward(Direction::Left)
+                        }))
+                        .on_action(cx.listener(|this, _: &FocusRight, _, _| {
+                            this.focus_toward(Direction::Right)
+                        }))
+                        .on_action(
+                            cx.listener(|this, _: &FocusUp, _, _| this.focus_toward(Direction::Up)),
+                        )
+                        .on_action(cx.listener(|this, _: &FocusDown, _, _| {
+                            this.focus_toward(Direction::Down)
+                        }))
+                        .on_action(cx.listener(|this, _: &IncreaseFontSize, _, cx| {
+                            this.set_font_size(crate::terminal::font_size_f32() + 1., cx)
+                        }))
+                        .on_action(cx.listener(|this, _: &DecreaseFontSize, _, cx| {
+                            this.set_font_size(crate::terminal::font_size_f32() - 1., cx)
+                        }))
+                        .on_action(cx.listener(|this, _: &ResetFontSize, _, cx| {
+                            crate::terminal::reset_font_size();
+                            this.redraw_panes(cx);
+                        }))
+                        .on_action(cx.listener(|_, _: &Quit, _, cx| cx.quit()))
+                })
+                .flex()
+                .flex_col()
+                .size_full()
+                .bg(rgb(ui().window))
+                .text_color(rgb(ui().text))
+                .font_family("Ubuntu Sans")
+                .child(self.render_titlebar(window, cx))
+                .when_some(self.reconnecting.clone(), |d, message| {
+                    d.child(self.render_reconnecting(message))
+                })
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .flex_1()
+                        .min_h(px(0.))
+                        .pl(px(4.))
+                        .when(self.sidebar, |d| d.child(self.render_sidebar(cx)))
+                        .child(self.render_window(window, cx)),
+                )
+                .when(self.host_menu, |d| d.child(self.render_host_menu(cx)))
+                .when_some(self.theme_menu.as_ref(), |d, menu| {
+                    d.child(self.render_theme_menu(menu, cx))
+                })
+                .when_some(self.add_host.as_ref(), |d, dialog| {
+                    d.child(self.render_add_host(dialog, cx))
+                })
+                .when_some(self.rename.as_ref(), |d, dialog| {
+                    d.child(self.render_rename(dialog, cx))
+                })
+                .when(self.switcher.is_some(), |d| {
+                    d.child(self.render_switcher(cx))
+                })
+                .when(self.shortcuts, |d| d.child(self.render_shortcuts(cx)));
         window_frame(content.into_any_element(), window)
     }
 }

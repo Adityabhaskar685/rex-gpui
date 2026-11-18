@@ -51,6 +51,10 @@ keymap! {
         SplitRight "split_right" ["ctrl-shift-d"] "Split right";
         SplitDown "split_down" ["ctrl-shift-e"] "Split down";
         NextPane "next_pane" ["ctrl-shift-o"] "Next pane";
+        FocusLeft "focus_left" ["ctrl-shift-left"] "Pane to the left";
+        FocusRight "focus_right" ["ctrl-shift-right"] "Pane to the right";
+        FocusUp "focus_up" ["ctrl-shift-up"] "Pane above";
+        FocusDown "focus_down" ["ctrl-shift-down"] "Pane below";
         ToggleZoom "zoom_pane" ["ctrl-shift-z"] "Zoom pane";
         ClosePane "close_pane" ["ctrl-shift-w"] "Close pane";
     ]

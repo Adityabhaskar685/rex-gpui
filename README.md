@@ -101,6 +101,10 @@ name for one run.
 - **Themes.** The palette button in the title bar opens the theme picker; type to search,
   Enter to apply the first match. See [Themes](#themes).
 - **Sidebar.** The sidebar button lists every session and the current session's tabs.
+- **Losing the server.** When the connection to the server drops, a banner says so and
+  the window reconnects on its own, trying again every few seconds, then comes back to the
+  same session. A remote server is also checked every 15 seconds, so a connection that died
+  silently, as after the laptop sleeps, is noticed too.
 - **Resizing panes.** Drag the border between two panes; the sizes are saved on the server.
 - **Shortcuts.** The keyboard button in the title bar, or ctrl-shift-k, lists every
   shortcut, with any you've changed.
@@ -128,6 +132,7 @@ name for one run.
 | ctrl-shift-d / ctrl-shift-e | Split right / down |
 | ctrl-shift-w | Close pane |
 | ctrl-shift-o | Next pane |
+| ctrl-shift-←/→/↑/↓ | Pane to the left / right / above / below |
 | ctrl-shift-z | Zoom pane |
 | ctrl-tab / ctrl-shift-tab | Next / previous tab |
 | ctrl-shift-n / ctrl-shift-s | New session / next session |
@@ -158,9 +163,10 @@ and restart rex-gpui. Each action takes a key, a list of keys, or `null` for non
 
 A key you give to one action stops doing what it did by default. The action names are
 `new_tab`, `next_tab`, `previous_tab`, `split_right`, `split_down`, `next_pane`,
-`zoom_pane`, `close_pane`, `new_session`, `next_session`, `rename_session`, `quick_switch`,
-`copy`, `paste`, `find`, `scroll_page_up`, `scroll_page_down`, `increase_font_size`,
-`decrease_font_size`, `reset_font_size`, `toggle_sidebar`, `show_shortcuts`, and `quit`.
+`focus_left`, `focus_right`, `focus_up`, `focus_down`, `zoom_pane`, `close_pane`,
+`new_session`, `next_session`, `rename_session`, `quick_switch`, `copy`, `paste`, `find`,
+`scroll_page_up`, `scroll_page_down`, `increase_font_size`, `decrease_font_size`,
+`reset_font_size`, `toggle_sidebar`, `show_shortcuts`, and `quit`.
 Mistakes in the file show at the bottom of the shortcuts overlay. When nothing is selected,
 `copy` passes its keys on to the program, so binding it to ctrl-c still lets ctrl-c
 interrupt.
