@@ -342,6 +342,60 @@ impl Terminal {
         Some(text)
     }
 
+    /// Where a grid reference is on screen, or `None` when it's scrolled out of view.
+    fn viewport_point_of(&self, at: &ffi::GhosttyGridRef) -> Option<ViewportPoint> {
+        let mut out = ffi::GhosttyPointCoordinate::default();
+        let code = unsafe {
+            ffi::ghostty_terminal_point_from_grid_ref(
+                self.0,
+                at,
+                ffi::GHOSTTY_POINT_TAG_VIEWPORT,
+                &mut out,
+            )
+        };
+        (code == ffi::GHOSTTY_SUCCESS && out.y < u32::from(self.rows())).then_some(ViewportPoint {
+            x: out.x,
+            y: out.y as u16,
+        })
+    }
+
+    /// The part of `selection` on screen, as its first and last cells. A selection that
+    /// starts above the screen or ends below it is cut off at the screen's edge.
+    fn visible_span(&self, selection: &ffi::GhosttySelection) -> Option<Span> {
+        let start = self.viewport_point_of(&selection.start);
+        let end = self.viewport_point_of(&selection.end);
+        let last = ViewportPoint {
+            x: self.cols().saturating_sub(1),
+            y: self.rows().saturating_sub(1),
+        };
+        match (start, end) {
+            (Some(start), Some(end)) => Some(Span { start, end }),
+            (None, Some(end)) => Some(Span {
+                start: ViewportPoint { x: 0, y: 0 },
+                end,
+            }),
+            (Some(start), None) => Some(Span { start, end: last }),
+            (None, None) => None,
+        }
+    }
+
+    /// The URI of the OSC 8 hyperlink on the cell at `point`, if it has one.
+    pub fn hyperlink_at(&self, point: ViewportPoint) -> Option<String> {
+        let at = self.grid_ref(point)?;
+        let mut len = 0usize;
+        let code = unsafe { ffi::ghostty_grid_ref_hyperlink_uri(&at, null_mut(), 0, &mut len) };
+        if code == ffi::GHOSTTY_SUCCESS || len == 0 {
+            return None;
+        }
+        let mut buf = vec![0u8; len];
+        let code =
+            unsafe { ffi::ghostty_grid_ref_hyperlink_uri(&at, buf.as_mut_ptr(), len, &mut len) };
+        (code == ffi::GHOSTTY_SUCCESS && len > 0).then(|| {
+            buf.truncate(len);
+            String::from_utf8_lossy(&buf).into_owned()
+        })
+    }
+
     /// The screen and scrollback as plain text.
     pub fn plain_text(&self) -> String {
         let mut options = sized!(ffi::GhosttyFormatterTerminalOptions);
@@ -367,6 +421,137 @@ impl Terminal {
         };
         unsafe { ffi::ghostty_formatter_free(formatter) };
         text
+    }
+}
+
+/// A run of cells on screen, from `start` to `end` with both included, in reading order.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Span {
+    pub start: ViewportPoint,
+    pub end: ViewportPoint,
+}
+
+/// A search of one terminal's screen and scrollback, kept up to date as the terminal
+/// changes. Every call takes the terminal it was made for, which keeps them behind the
+/// terminal's lock, as libghostty-vt requires.
+pub struct Search(ffi::GhosttySearch);
+
+// SAFETY: a search is only used with its terminal's lock held.
+unsafe impl Send for Search {}
+
+impl Drop for Search {
+    fn drop(&mut self) {
+        // libghostty-vt allows freeing the search and its terminal in either order.
+        unsafe { ffi::ghostty_search_free(self.0) }
+    }
+}
+
+impl Search {
+    pub fn new(term: &Terminal) -> Result<Self> {
+        let mut search = null_mut();
+        check(
+            unsafe { ffi::ghostty_search_new(null(), &mut search, term.0) },
+            "starting a search",
+        )?;
+        Ok(Self(search))
+    }
+
+    /// Look for `needle`, ignoring the case of ASCII letters. An empty needle finds nothing.
+    pub fn set_needle(&mut self, _term: &Terminal, needle: &str) {
+        let value = ffi::GhosttyString {
+            ptr: needle.as_ptr(),
+            len: needle.len(),
+        };
+        let value = if needle.is_empty() {
+            null()
+        } else {
+            &value as *const _ as *const c_void
+        };
+        unsafe { ffi::ghostty_search_set(self.0, ffi::GHOSTTY_SEARCH_OPT_NEEDLE, value) };
+    }
+
+    /// Catch up with what the terminal holds now.
+    pub fn run(&mut self, _term: &Terminal) {
+        unsafe { ffi::ghostty_search_run(self.0) };
+    }
+
+    /// Select the next match, toward older output when `older`, and scroll to it.
+    pub fn select(&mut self, term: &Terminal, older: bool) {
+        let option = if older {
+            ffi::GHOSTTY_SEARCH_OPT_SELECT_NEXT
+        } else {
+            ffi::GHOSTTY_SEARCH_OPT_SELECT_PREV
+        };
+        unsafe { ffi::ghostty_search_set(self.0, option, null()) };
+        // The matches on screen are worked out when the search reads the terminal, so read
+        // it again for where the view scrolled to.
+        self.run(term);
+    }
+
+    pub fn total(&self) -> usize {
+        let mut total = 0usize;
+        unsafe {
+            ffi::ghostty_search_get(
+                self.0,
+                ffi::GHOSTTY_SEARCH_DATA_TOTAL_MATCHES,
+                &mut total as *mut _ as *mut c_void,
+            )
+        };
+        total
+    }
+
+    /// Which match is selected, counting from 0 for the newest.
+    pub fn selected_index(&self) -> Option<usize> {
+        let mut index = 0usize;
+        let code = unsafe {
+            ffi::ghostty_search_get(
+                self.0,
+                ffi::GHOSTTY_SEARCH_DATA_SELECTED_INDEX,
+                &mut index as *mut _ as *mut c_void,
+            )
+        };
+        (code == ffi::GHOSTTY_SUCCESS).then_some(index)
+    }
+
+    /// The matches on screen, and which of them is the selected one.
+    pub fn visible_matches(&self, term: &Terminal) -> (Vec<Span>, Option<Span>) {
+        let mut buffer = ffi::GhosttySelectionBuffer {
+            ptr: null_mut(),
+            cap: 0,
+            len: 0,
+        };
+        let get = |buffer: &mut ffi::GhosttySelectionBuffer| unsafe {
+            ffi::ghostty_search_get(
+                self.0,
+                ffi::GHOSTTY_SEARCH_DATA_VIEWPORT_MATCHES,
+                buffer as *mut _ as *mut c_void,
+            )
+        };
+        let mut found = Vec::new();
+        if get(&mut buffer) == ffi::GHOSTTY_OUT_OF_SPACE && buffer.len > 0 {
+            found = vec![sized!(ffi::GhosttySelection); buffer.len];
+            buffer.ptr = found.as_mut_ptr();
+            buffer.cap = found.len();
+            if get(&mut buffer) == ffi::GHOSTTY_SUCCESS {
+                found.truncate(buffer.len);
+            } else {
+                found.clear();
+            }
+        }
+        let spans = found.iter().filter_map(|m| term.visible_span(m)).collect();
+
+        let mut selected = sized!(ffi::GhosttySelection);
+        let code = unsafe {
+            ffi::ghostty_search_get(
+                self.0,
+                ffi::GHOSTTY_SEARCH_DATA_SELECTED_MATCH,
+                &mut selected as *mut _ as *mut c_void,
+            )
+        };
+        let selected = (code == ffi::GHOSTTY_SUCCESS)
+            .then(|| term.visible_span(&selected))
+            .flatten();
+        (spans, selected)
     }
 }
 
@@ -474,6 +659,11 @@ impl RenderState {
     /// with `frame` needs no lock.
     pub fn update(&mut self, terminal: &Terminal) {
         unsafe { ffi::ghostty_render_state_update(self.state, terminal.0) };
+    }
+
+    /// The rows of the last frame, as drawn.
+    pub fn rows(&self) -> &[Vec<Cell>] {
+        &self.cache
     }
 
     /// Read every row again on the next frame, not just the ones libghostty-vt marks dirty.
@@ -721,6 +911,50 @@ mod tests {
         term.clear_selection();
         state.update(&term);
         assert!(!state.frame().rows[0][1].selected);
+    }
+
+    #[test]
+    fn finds_text_in_the_scrollback() {
+        let mut term = Terminal::new(20, 3).unwrap();
+        term.write(b"needle one\r\n");
+        for i in 0..10 {
+            term.write(format!("filler {i}\r\n").as_bytes());
+        }
+        term.write(b"a NEEDLE two");
+        let mut search = Search::new(&term).unwrap();
+        search.set_needle(&term, "needle");
+        search.run(&term);
+        assert_eq!(search.total(), 2);
+        // The newest match is on screen; the older one is in the scrollback.
+        search.select(&term, true);
+        assert_eq!(search.selected_index(), Some(0));
+        let (visible, selected) = search.visible_matches(&term);
+        let newest = Span {
+            start: ViewportPoint { x: 2, y: 2 },
+            end: ViewportPoint { x: 7, y: 2 },
+        };
+        assert_eq!(selected, Some(newest));
+        assert_eq!(visible, vec![newest]);
+        // Selecting the older match scrolls back to it.
+        search.select(&term, true);
+        assert_eq!(search.selected_index(), Some(1));
+        assert!(!term.at_bottom());
+        let (_, selected) = search.visible_matches(&term);
+        assert_eq!(selected.map(|s| (s.start.x, s.end.x)), Some((0, 5)));
+        search.set_needle(&term, "");
+        search.run(&term);
+        assert_eq!(search.total(), 0);
+    }
+
+    #[test]
+    fn reads_hyperlinks() {
+        let mut term = Terminal::new(30, 2).unwrap();
+        term.write(b"see \x1b]8;;https://example.com/a\x1b\\docs\x1b]8;;\x1b\\ here");
+        let at = |x| term.hyperlink_at(ViewportPoint { x, y: 0 });
+        assert_eq!(at(4).as_deref(), Some("https://example.com/a"));
+        assert_eq!(at(7).as_deref(), Some("https://example.com/a"));
+        assert_eq!(at(3), None);
+        assert_eq!(at(8), None);
     }
 
     #[test]

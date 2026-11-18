@@ -20,7 +20,10 @@ What it does:
 - Terminals restored from the server's own Ghostty snapshots, so they match the server
   exactly, with selection, scrollback, mouse support for programs that use it, and a
   clipboard that works with programs that copy (OSC 52), such as Claude Code.
-- Built-in and Ghostty themes, a keyboard shortcuts overlay, and a desktop launcher.
+- Search through the screen and scrollback, Ctrl+click links, and change the text size
+  with the keyboard.
+- A quick switcher to jump to any session or tab by typing part of its name.
+- Built-in and Ghostty themes, keyboard shortcuts you can change, and a desktop launcher.
 
 ## Install
 
@@ -84,6 +87,7 @@ rex-gpui --list-themes
 - `--list-themes` prints every theme it found and where from.
 
 `REX_FONT` and `REX_FONT_SIZE` change the terminal font (default Hack Nerd Font Mono, 14).
+A size chosen with ctrl-= and ctrl-- is kept between runs; ctrl-0 goes back to the default.
 `REX_SCROLL_LINES` sets the lines per wheel notch (default 3). `REX_THEME` picks a theme by
 name for one run.
 
@@ -99,7 +103,15 @@ name for one run.
 - **Sidebar.** The sidebar button lists every session and the current session's tabs.
 - **Resizing panes.** Drag the border between two panes; the sizes are saved on the server.
 - **Shortcuts.** The keyboard button in the title bar, or ctrl-shift-k, lists every
-  shortcut.
+  shortcut, with any you've changed.
+- **Quick switcher.** ctrl-shift-p lists this session's tabs, then every other session and
+  its tabs. Type to narrow the list, Up and Down to move, Enter to go there.
+- **Search.** ctrl-shift-f opens a search bar in the focused pane. It searches the screen and
+  the scrollback, ignoring the case of ASCII letters, and highlights every match. Enter or Up
+  goes to the next older match, Shift+Enter or Down to the next newer one, and Esc closes it.
+- **Links.** Hold Ctrl over a link to underline it, and Ctrl+click to open it in your
+  browser. Links programs make with OSC 8 work, as do http, https, ftp, and mailto
+  addresses in the text. Other kinds of links aren't opened.
 - **Mouse.** Drag to select, which also sets the primary selection; middle-click pastes it.
   Programs that use the mouse get it; hold shift to select anyway. The wheel scrolls back
   through history, or goes to full-screen programs. Drag the scrollbar at the right of a pane,
@@ -119,16 +131,39 @@ name for one run.
 | ctrl-shift-z | Zoom pane |
 | ctrl-tab / ctrl-shift-tab | Next / previous tab |
 | ctrl-shift-n / ctrl-shift-s | New session / next session |
+| ctrl-shift-p | Go to a session or tab |
 | ctrl-shift-b | Toggle the sidebar |
 | ctrl-shift-r | Rename the session |
 | ctrl-shift-k | Show the keyboard shortcuts |
 | ctrl-shift-c / ctrl-shift-v | Copy selection / paste |
+| ctrl-shift-f | Search the screen and scrollback |
 | shift-pageup / shift-pagedown | Scroll back |
+| ctrl-= / ctrl-- / ctrl-0 | Bigger / smaller / default text size |
 | ctrl-shift-q | Quit |
 
 Ctrl+Shift+K shows them all in the app:
 
 <img src="docs/shortcuts.png" alt="The keyboard shortcuts overlay" width="560">
+
+To change them, put the actions you want to change in `~/.config/rex-gpui/keybindings.json`
+and restart rex-gpui. Each action takes a key, a list of keys, or `null` for none:
+
+```json
+{
+  "split_right": "alt-d",
+  "copy": ["ctrl-shift-c", "ctrl-insert"],
+  "quit": null
+}
+```
+
+A key you give to one action stops doing what it did by default. The action names are
+`new_tab`, `next_tab`, `previous_tab`, `split_right`, `split_down`, `next_pane`,
+`zoom_pane`, `close_pane`, `new_session`, `next_session`, `rename_session`, `quick_switch`,
+`copy`, `paste`, `find`, `scroll_page_up`, `scroll_page_down`, `increase_font_size`,
+`decrease_font_size`, `reset_font_size`, `toggle_sidebar`, `show_shortcuts`, and `quit`.
+Mistakes in the file show at the bottom of the shortcuts overlay. When nothing is selected,
+`copy` passes its keys on to the program, so binding it to ctrl-c still lets ctrl-c
+interrupt.
 
 Every other key goes to the server with `client.key`, so the Lua bindings in your Rex config
 apply, and the server's terminal encodes the key, including the Kitty keyboard protocol.

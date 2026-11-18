@@ -11,11 +11,11 @@ use anyhow::Result;
 use gpui::{
     AnyElement, AnyView, App, Bounds, Context, CursorStyle, Decorations, Entity, FocusHandle,
     Focusable, FontWeight, HitboxBehavior, MouseButton, Pixels, Point, ResizeEdge, SharedString,
-    Size, StyleRefinement, Task, Window, actions, canvas, div, point, prelude::*, px, relative,
-    rgb, svg,
+    Size, StyleRefinement, Task, Window, canvas, div, point, prelude::*, px, relative, rgb, svg,
 };
 use serde_json::{Value, json};
 
+use crate::keymap::*;
 use crate::rex::control::{Control, Event};
 use crate::rex::view::{Border, SessionSummary, SessionView, WindowView};
 use crate::terminal::TerminalPane;
@@ -23,49 +23,12 @@ use crate::terminal::TerminalPane;
 mod hosts;
 mod rename;
 mod shortcuts;
+mod switcher;
 mod theme_menu;
 use hosts::{AddHostDialog, Host};
 use rename::RenameDialog;
+use switcher::Switcher;
 use theme_menu::ThemeMenu;
-
-/// Every window shortcut, once: its keys, the action it runs, and how the shortcuts overlay
-/// describes it. This makes the actions, binds the keys, and fills the overlay, so the three
-/// can't drift apart.
-macro_rules! shortcuts {
-    ($($group:literal => [$($keys:literal: $action:ident, $what:literal;)*])*) => {
-        actions!(rex, [$($($action,)*)*]);
-
-        pub fn bind_keys(cx: &mut App) {
-            cx.bind_keys([$($(gpui::KeyBinding::new($keys, $action, None),)*)*]);
-        }
-
-        /// The window's shortcuts by group, as `(keys, what they do)`.
-        pub const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[$(($group, &[$(($keys, $what),)*]),)*];
-    };
-}
-
-shortcuts! {
-    "Tabs and panes" => [
-        "ctrl-shift-t": NewWindow, "New tab";
-        "ctrl-tab": NextWindow, "Next tab";
-        "ctrl-shift-tab": PreviousWindow, "Previous tab";
-        "ctrl-shift-d": SplitRight, "Split right";
-        "ctrl-shift-e": SplitDown, "Split down";
-        "ctrl-shift-o": NextPane, "Next pane";
-        "ctrl-shift-z": ToggleZoom, "Zoom pane";
-        "ctrl-shift-w": ClosePane, "Close pane";
-    ]
-    "Sessions" => [
-        "ctrl-shift-n": NewSession, "New session";
-        "ctrl-shift-s": NextSession, "Next session";
-        "ctrl-shift-r": RenameSession, "Rename session";
-    ]
-    "Window" => [
-        "ctrl-shift-b": ToggleSidebar, "Show or hide the sidebar";
-        "ctrl-shift-k": ToggleShortcuts, "Show these shortcuts";
-        "ctrl-shift-q": Quit, "Quit";
-    ]
-}
 
 const SHELL: &str = "com.superlogical.terminal.shell";
 
@@ -115,6 +78,8 @@ pub struct Workspace {
     confirm_remove: Option<String>,
     rename: Option<RenameDialog>,
     theme_menu: Option<ThemeMenu>,
+    /// The quick switcher, while it's open.
+    switcher: Option<Switcher>,
     /// A message about connecting to another host, shown in the host menu.
     notice: Option<String>,
     error: Option<String>,
@@ -151,6 +116,7 @@ impl Workspace {
             confirm_remove: None,
             rename: None,
             theme_menu: None,
+            switcher: None,
             notice: None,
             error: None,
             focus_handle: cx.focus_handle(),
@@ -998,7 +964,24 @@ impl Workspace {
 
     /// Whether a text field (adding a host, renaming, searching themes) has the keyboard.
     fn typing(&self) -> bool {
-        self.add_host.is_some() || self.rename.is_some() || self.theme_menu.is_some()
+        self.add_host.is_some()
+            || self.rename.is_some()
+            || self.theme_menu.is_some()
+            || self.switcher.is_some()
+    }
+
+    fn set_font_size(&mut self, size: f32, cx: &mut Context<Self>) {
+        crate::terminal::set_font_size(size);
+        self.redraw_panes(cx);
+    }
+
+    /// Panes are cached views, so each has to be told to draw again, as after the font
+    /// size changes.
+    fn redraw_panes(&mut self, cx: &mut Context<Self>) {
+        for pane in self.panes.values() {
+            pane.update(cx, |_, cx| cx.notify());
+        }
+        cx.notify();
     }
 
     fn toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
@@ -1033,7 +1016,12 @@ impl Render for Workspace {
                 if this.shortcuts && event.keystroke.key == "escape" {
                     this.toggle_shortcuts(&ToggleShortcuts, window, cx);
                 }
+                if this.switcher.is_some() {
+                    this.on_switcher_key(event, cx);
+                }
             }))
+            // The switcher's own key closes it again, even while its field has the keyboard.
+            .on_action(cx.listener(Self::toggle_switcher))
             // While a text field is open, leave the window's shortcuts unhandled, so their
             // keys reach the field as typing instead of closing panes or quitting.
             .when(!self.typing(), |d| {
@@ -1070,6 +1058,16 @@ impl Render for Workspace {
                     .on_action(cx.listener(|this, _: &NextPane, _, _| {
                         this.call("session.focus_next_pane", json!({}))
                     }))
+                    .on_action(cx.listener(|this, _: &IncreaseFontSize, _, cx| {
+                        this.set_font_size(crate::terminal::font_size_f32() + 1., cx)
+                    }))
+                    .on_action(cx.listener(|this, _: &DecreaseFontSize, _, cx| {
+                        this.set_font_size(crate::terminal::font_size_f32() - 1., cx)
+                    }))
+                    .on_action(cx.listener(|this, _: &ResetFontSize, _, cx| {
+                        crate::terminal::reset_font_size();
+                        this.redraw_panes(cx);
+                    }))
                     .on_action(cx.listener(|_, _: &Quit, _, cx| cx.quit()))
             })
             .flex()
@@ -1098,6 +1096,9 @@ impl Render for Workspace {
             })
             .when_some(self.rename.as_ref(), |d, dialog| {
                 d.child(self.render_rename(dialog, cx))
+            })
+            .when(self.switcher.is_some(), |d| {
+                d.child(self.render_switcher(cx))
             })
             .when(self.shortcuts, |d| d.child(self.render_shortcuts(cx)));
         window_frame(content.into_any_element(), window)

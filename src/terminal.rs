@@ -8,18 +8,24 @@ use std::cell::RefCell;
 use std::ops::Range;
 use std::rc::Rc;
 
-use crate::ghostty::{self, CursorShape, RenderState, Rgb, Scroll, ViewportPoint, Width};
+use std::sync::atomic::{AtomicU32, Ordering};
+
+use crate::ghostty::{
+    self, CursorShape, RenderState, Rgb, Scroll, Search, Span, ViewportPoint, Width,
+};
 use gpui::{
-    App, Bounds, ClipboardItem, Context, FocusHandle, Focusable, Font, FontWeight, Hsla,
-    KeyDownEvent, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    Point, ScrollDelta, ScrollWheelEvent, SharedString, Task, TextRun, Window, canvas, div, fill,
-    font, outline, point, prelude::*, px, size,
+    App, Bounds, ClipboardItem, Context, Entity, FocusHandle, Focusable, Font, FontWeight, Hsla,
+    KeyDownEvent, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Pixels, Point, ScrollDelta, ScrollWheelEvent, SharedString, Subscription, Task,
+    TextRun, Window, canvas, div, fill, font, outline, point, prelude::*, px, size,
 };
 use serde_json::{Value, json};
 
+use crate::keymap::{Copy, Find, Paste, ScrollPageDown, ScrollPageUp};
 use crate::keys;
 use crate::mirror::{self, Mirror, MirrorEvent, SharedTerm};
 use crate::rex::control::Control;
+use crate::text_field::{TextField, TextFieldEvent};
 use crate::theme::ui;
 /// Width kept free at the right of the grid for the scrollbar.
 const SCROLLBAR_WIDTH: f32 = 10.;
@@ -51,12 +57,22 @@ pub struct TerminalPane {
     /// The colors last given to the terminal, and the terminal they were given to, so they
     /// are set again when either changes.
     applied_theme: Option<(u64, String)>,
+    /// Where the grid was last laid out, to tell whether the pointer is over it.
+    grid_bounds: Option<Bounds<Pixels>>,
+    /// A Ctrl+click opened a link, so its release isn't for the program either.
+    swallow_release: bool,
     /// The grid's height when last painted, which is also the scrollbar's track.
     track_height: Option<Pixels>,
     /// The scrollbar thumb is being dragged, held this far below its top.
     scroll_drag: Option<Pixels>,
     /// A multi-line paste waiting for the user to confirm it. See `paste`.
     pending_paste: Option<String>,
+    /// The search bar, while it's open.
+    search: Option<SearchBar>,
+    /// What was last searched for, to offer again when the search bar opens.
+    last_needle: String,
+    /// The link under the pointer while Ctrl is held, which a click opens.
+    hover_link: Option<Link>,
     /// The size we last asked the server for.
     requested: Option<(u16, u16)>,
     exit_code: Option<i64>,
@@ -112,6 +128,24 @@ impl PaneInfo {
             self.home = home.to_string();
         }
     }
+}
+
+struct SearchBar {
+    field: Entity<TextField>,
+    /// The needle the search has, to notice when the field's text changes.
+    needle: String,
+    /// Matches in the screen and scrollback, and which one is selected, from the last frame.
+    total: usize,
+    selected: Option<usize>,
+    _subscriptions: [Subscription; 2],
+}
+
+/// A link on screen: one row's cells, and where they lead.
+#[derive(Clone, Debug, PartialEq)]
+struct Link {
+    row: usize,
+    cols: Range<usize>,
+    url: String,
 }
 
 #[derive(Clone, Copy)]
@@ -196,9 +230,14 @@ impl TerminalPane {
             last_mouse_cell: None,
             render_state: RenderState::new().expect("creating a render state"),
             applied_theme: None,
+            grid_bounds: None,
+            swallow_release: false,
             track_height: None,
             scroll_drag: None,
             pending_paste: None,
+            search: None,
+            last_needle: String::new(),
+            hover_link: None,
             requested: None,
             exit_code: None,
             info: PaneInfo::default(),
@@ -348,9 +387,151 @@ impl TerminalPane {
         cx.notify();
     }
 
-    fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    /// Whether the terminal itself has the keyboard, not the search bar inside it.
+    fn has_keyboard(&self, window: &Window) -> bool {
+        self.focus_handle.is_focused(window)
+    }
+
+    fn copy(&mut self, _: &Copy, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.term().term.selection_text().unwrap_or_default();
+        // With nothing selected, the keys go to the program, so a binding such as ctrl-c can
+        // copy a selection and still interrupt.
+        if text.is_empty() || !self.has_keyboard(window) {
+            cx.propagate();
+            return;
+        }
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+    }
+
+    fn paste_clipboard(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
+        // In the search bar, the keys paste into the bar.
+        if !self.has_keyboard(window) {
+            cx.propagate();
+            return;
+        }
+        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+            self.paste(text, cx);
+        }
+    }
+
+    fn scroll_page(&mut self, up: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.has_keyboard(window) {
+            cx.propagate();
+            return;
+        }
+        let rows = self.term().term.rows() as isize;
+        self.term()
+            .term
+            .scroll(Scroll::Delta(if up { -rows } else { rows }));
+        cx.notify();
+    }
+
+    /// Open the search bar, or give it the keyboard back.
+    fn find(&mut self, _: &Find, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(bar) = &self.search {
+            window.focus(&bar.field.focus_handle(cx));
+            return;
+        }
+        let needle = self.last_needle.clone();
+        let field = cx.new(|cx| TextField::new("Find", cx).with_text(needle));
+        let subscriptions = [
+            cx.observe(&field, |this, field, cx| {
+                let text = field.read(cx).text.clone();
+                this.search_for(text, cx);
+            }),
+            cx.subscribe_in(&field, window, |this, _, event, window, cx| match event {
+                TextFieldEvent::Submit => this.select_match(true, cx),
+                TextFieldEvent::Cancel => this.close_search(window, cx),
+            }),
+        ];
+        window.focus(&field.focus_handle(cx));
+        let text = field.read(cx).text.clone();
+        self.search = Some(SearchBar {
+            field,
+            needle: String::new(),
+            total: 0,
+            selected: None,
+            _subscriptions: subscriptions,
+        });
+        self.search_for(text, cx);
+    }
+
+    /// Search for `needle`, from the newest output back, when it isn't already the needle.
+    fn search_for(&mut self, needle: String, cx: &mut Context<Self>) {
+        let Some(bar) = &mut self.search else { return };
+        if bar.needle == needle {
+            return;
+        }
+        bar.needle = needle.clone();
+        self.last_needle = needle.clone();
+        {
+            let mut shared = self.term();
+            let mirror::Shared {
+                term,
+                generation,
+                search,
+            } = &mut *shared;
+            if let Some(search) = live_search(search, term, *generation, &needle) {
+                search.set_needle(term, &needle);
+                search.run(term);
+                // Show the newest match, as a search from the prompt wants.
+                if search.total() > 0 {
+                    search.select(term, true);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Move to the next match, toward older output when `older`.
+    fn select_match(&mut self, older: bool, cx: &mut Context<Self>) {
+        let Some(bar) = &self.search else { return };
+        let needle = bar.needle.clone();
+        {
+            let mut shared = self.term();
+            let mirror::Shared {
+                term,
+                generation,
+                search,
+            } = &mut *shared;
+            if let Some(search) = live_search(search, term, *generation, &needle) {
+                search.select(term, older);
+            }
+        }
+        cx.notify();
+    }
+
+    fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search = None;
+        self.term().search = None;
+        window.focus(&self.focus_handle);
+        cx.notify();
+    }
+
+    /// Keys for the search bar that its text field leaves alone: Shift+Enter and the arrows
+    /// move between matches.
+    fn on_search_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(bar) = &self.search else { return };
+        if !bar.field.focus_handle(cx).is_focused(window) {
+            return;
+        }
         let ks = &event.keystroke;
-        let m = &ks.modifiers;
+        let older = match ks.key.as_str() {
+            "enter" if ks.modifiers.shift => false,
+            "up" => true,
+            "down" => false,
+            _ => return,
+        };
+        cx.stop_propagation();
+        self.select_match(older, cx);
+    }
+
+    fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // Keys the search bar didn't use aren't for the program.
+        if !self.has_keyboard(window) {
+            return;
+        }
+        let ks = &event.keystroke;
         if self.pending_paste.is_some() {
             match ks.key.as_str() {
                 "enter" => self.confirm_paste(false, cx),
@@ -363,30 +544,7 @@ impl TerminalPane {
             cx.stop_propagation();
             return;
         }
-        // Clipboard keys stay with the client, as in most Linux terminals.
-        if m.control && m.shift && !m.alt && ks.key == "v" {
-            if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                self.paste(text, cx);
-            }
-            cx.stop_propagation();
-            return;
-        }
-        if m.control && m.shift && !m.alt && ks.key == "c" {
-            let text = self.term().term.selection_text().unwrap_or_default();
-            if !text.is_empty() {
-                cx.write_to_clipboard(ClipboardItem::new_string(text));
-            }
-            cx.stop_propagation();
-            return;
-        }
-        if m.shift && !m.control && matches!(ks.key.as_str(), "pageup" | "pagedown") {
-            let rows = self.term().term.rows() as isize;
-            let delta = if ks.key == "pageup" { -rows } else { rows };
-            self.term().term.scroll(Scroll::Delta(delta));
-            cx.notify();
-            cx.stop_propagation();
-            return;
-        }
+        // Copy, paste, and the client's other keys are actions, bound in `keymap`.
         let Some(key) = keys::client_key(ks, event.is_held) else {
             return;
         };
@@ -525,6 +683,16 @@ impl TerminalPane {
         cx: &mut Context<Self>,
     ) {
         window.focus(&self.focus_handle);
+        self.swallow_release = false;
+        if event.button == MouseButton::Left
+            && event.modifiers.control
+            && !event.modifiers.shift
+            && let Some(link) = self.link_at(event.position)
+        {
+            cx.open_url(&link.url);
+            self.swallow_release = true;
+            return;
+        }
         if self.program_wants_mouse(&event.modifiers) {
             self.last_mouse_cell = self.cell_at(event.position);
             self.send_mouse(
@@ -638,6 +806,8 @@ impl TerminalPane {
         if crate::workspace::dragging_border() {
             return;
         }
+        let ctrl = event.modifiers.control && !event.modifiers.shift;
+        self.update_hover_link(event.position, ctrl && event.pressed_button.is_none(), cx);
         if let (Some(grab), Some(origin)) = (self.scroll_drag, self.origin) {
             if event.pressed_button == Some(MouseButton::Left) {
                 self.scroll_to_thumb(f32::from(event.position.y - origin.y - grab), cx);
@@ -683,6 +853,9 @@ impl TerminalPane {
     }
 
     fn on_mouse_up(&mut self, event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.swallow_release) {
+            return;
+        }
         if self.scroll_drag.take().is_some() {
             return;
         }
@@ -702,9 +875,65 @@ impl TerminalPane {
         }
     }
 
+    /// Pressing or letting go of Ctrl shows or hides the link under the pointer.
+    fn on_modifiers_changed(
+        &mut self,
+        event: &ModifiersChangedEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let position = window.mouse_position();
+        let over = self.grid_bounds.is_some_and(|b| b.contains(&position));
+        let ctrl = event.modifiers.control && !event.modifiers.shift;
+        self.update_hover_link(position, ctrl && over, cx);
+    }
+
+    fn update_hover_link(&mut self, position: Point<Pixels>, active: bool, cx: &mut Context<Self>) {
+        let link = if active { self.link_at(position) } else { None };
+        if link != self.hover_link {
+            self.hover_link = link;
+            cx.notify();
+        }
+    }
+
+    /// The link at a window position: a hyperlink a program made with OSC 8, else a URL in
+    /// the text. Only web and mail links count, so output can't open other kinds of things.
+    fn link_at(&self, position: Point<Pixels>) -> Option<Link> {
+        let (col, row) = self.cell_at(position)?;
+        {
+            let shared = self.term();
+            let at = |x: usize| {
+                shared.term.hyperlink_at(ViewportPoint {
+                    x: x as u16,
+                    y: row as u16,
+                })
+            };
+            if let Some(url) = at(col).filter(|url| openable(url)) {
+                let cols = shared.term.cols() as usize;
+                let same = |x: usize| at(x).as_deref() == Some(url.as_str());
+                let mut start = col;
+                while start > 0 && same(start - 1) {
+                    start -= 1;
+                }
+                let mut end = col + 1;
+                while end < cols && same(end) {
+                    end += 1;
+                }
+                return Some(Link {
+                    row,
+                    cols: start..end,
+                    url,
+                });
+            }
+        }
+        let (cols, url) = url_in_row(self.render_state.rows().get(row)?, col)?;
+        Some(Link { row, cols, url })
+    }
+
     /// Ask the server for the size that fills `bounds`, when it differs from the last request.
     fn request_size(&mut self, bounds: Bounds<Pixels>, cell: CellMetrics) {
         self.origin = Some(bounds.origin);
+        self.grid_bounds = Some(bounds);
         self.track_height = Some(bounds.size.height);
         let width = bounds.size.width - px(SCROLLBAR_WIDTH);
         let cols = ((width / cell.width).floor() as u16).max(2);
@@ -736,19 +965,136 @@ impl TerminalPane {
     }
 }
 
-/// The keys and mouse actions a terminal pane handles itself, for the shortcuts overlay.
-/// Keep this beside `on_key_down` and the mouse handlers, which implement them.
-pub const SHORTCUTS: &[(&str, &str)] = &[
-    ("ctrl-shift-c", "Copy the selection"),
-    ("ctrl-shift-v", "Paste"),
-    ("shift-pageup", "Scroll back a page"),
-    ("shift-pagedown", "Scroll forward a page"),
+/// The search of the terminal in `slot`, made again for a terminal that replaced the one it
+/// searched, as after a reconnect.
+fn live_search<'a>(
+    slot: &'a mut Option<(u64, Search)>,
+    term: &ghostty::Terminal,
+    generation: u64,
+    needle: &str,
+) -> Option<&'a mut Search> {
+    if slot.as_ref().is_none_or(|(g, _)| *g != generation) {
+        *slot = None;
+        match Search::new(term) {
+            Ok(mut search) => {
+                search.set_needle(term, needle);
+                *slot = Some((generation, search));
+            }
+            Err(err) => log::warn!("{err:#}"),
+        }
+    }
+    slot.as_mut().map(|(_, search)| search)
+}
+
+/// Whether a link is one a click may open: a web or mail address.
+fn openable(url: &str) -> bool {
+    let url = url.to_ascii_lowercase();
+    ["http://", "https://", "ftp://", "mailto:"]
+        .iter()
+        .any(|scheme| url.starts_with(scheme) && url.len() > scheme.len())
+}
+
+/// The URL in a row of cells that covers column `col`, with the columns it spans.
+fn url_in_row(cells: &[ghostty::Cell], col: usize) -> Option<(Range<usize>, String)> {
+    // The row's characters, each with the column it's drawn in.
+    let mut chars: Vec<(char, usize)> = Vec::new();
+    for (c, cell) in cells.iter().enumerate() {
+        match cell.width {
+            Width::Spacer => {}
+            _ if cell.text.is_empty() => chars.push((' ', c)),
+            _ => chars.extend(cell.text.chars().map(|ch| (ch, c))),
+        }
+    }
+    let lower: Vec<char> = chars
+        .iter()
+        .map(|(ch, _)| ch.to_ascii_lowercase())
+        .collect();
+    let starts_with = |i: usize, s: &str| {
+        s.chars()
+            .enumerate()
+            .all(|(k, c)| lower.get(i + k) == Some(&c))
+    };
+    let url_char = |c: char| {
+        c.is_ascii_graphic() && !matches!(c, '<' | '>' | '"' | '`' | '\\' | '^' | '{' | '}' | '|')
+            || c.is_alphanumeric()
+    };
+    let mut i = 0;
+    while i < chars.len() {
+        let after_boundary = i == 0 || !chars[i - 1].0.is_alphanumeric();
+        let scheme = ["https://", "http://", "ftp://", "mailto:"]
+            .into_iter()
+            .find(|s| after_boundary && starts_with(i, s));
+        let Some(scheme) = scheme else {
+            i += 1;
+            continue;
+        };
+        let mut end = i;
+        while end < chars.len() && url_char(chars[end].0) {
+            end += 1;
+        }
+        // Punctuation that ends a sentence, and brackets the URL didn't open, aren't part
+        // of it: `(see https://example.com/a).`
+        while let Some(&(last, _)) = chars[i..end].last() {
+            let text = || chars[i..end].iter().map(|(c, _)| *c);
+            let unbalanced = |open: char, close: char| {
+                last == close
+                    && text().filter(|&c| c == open).count()
+                        < text().filter(|&c| c == close).count()
+            };
+            if matches!(last, '.' | ',' | ';' | ':' | '!' | '?' | '\'' | '*')
+                || unbalanced('(', ')')
+                || unbalanced('[', ']')
+            {
+                end -= 1;
+            } else {
+                break;
+            }
+        }
+        if end > i + scheme.chars().count() {
+            let span = chars[i].1..chars[end - 1].1 + 1;
+            if span.contains(&col) {
+                return Some((span, chars[i..end].iter().map(|(c, _)| *c).collect()));
+            }
+        }
+        i = end.max(i + 1);
+    }
+    None
+}
+
+/// The mouse actions a terminal pane handles itself, for the shortcuts overlay. Keep this
+/// beside the mouse handlers, which implement them. Its keys are in `keymap`.
+pub const MOUSE_SHORTCUTS: &[(&str, &str)] = &[
+    ("ctrl-click", "Open a link"),
     ("drag", "Select text"),
     ("double-click", "Select a word"),
     ("triple-click", "Select a line"),
     ("shift-drag", "Select, even when a program has the mouse"),
     ("middle-click", "Paste the primary selection"),
 ];
+
+/// Search match colors: every match, and the selected one.
+const MATCH: u32 = 0xe5c07b;
+const SELECTED_MATCH: u32 = 0xff9e3b;
+
+/// The cells of `span` on each row it covers, on a grid `cols` wide.
+fn span_rows(span: Span, cols: usize) -> Vec<(usize, Range<usize>)> {
+    let (first, last) = (span.start.y as usize, span.end.y as usize);
+    (first..=last)
+        .map(|row| {
+            let start = if row == first {
+                span.start.x as usize
+            } else {
+                0
+            };
+            let end = if row == last {
+                span.end.x as usize + 1
+            } else {
+                cols
+            };
+            (row, start..end.max(start))
+        })
+        .collect()
+}
 
 /// DEC private modes the pane checks.
 const BRACKETED_PASTE: u16 = 2004;
@@ -777,11 +1123,53 @@ fn scroll_multiplier() -> f32 {
         .unwrap_or(3.)
 }
 
-pub fn font_size() -> Pixels {
-    px(std::env::var("REX_FONT_SIZE")
+/// The terminal text size in pixels, as bits of an `f32`; 0 until it's first read.
+static FONT_SIZE: AtomicU32 = AtomicU32::new(0);
+const FONT_SIZES: std::ops::RangeInclusive<f32> = 6.0..=72.0;
+
+/// The size to start from: `REX_FONT_SIZE`, else 14.
+fn default_font_size() -> f32 {
+    std::env::var("REX_FONT_SIZE")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(14.0))
+        .filter(|size| FONT_SIZES.contains(size))
+        .unwrap_or(14.0)
+}
+
+/// The terminal text size: the one last chosen with the font size keys, else the default.
+pub fn font_size_f32() -> f32 {
+    match FONT_SIZE.load(Ordering::Relaxed) {
+        0 => {
+            let size = crate::settings::get("font_size")
+                .and_then(|v| v.as_f64())
+                .map(|v| v as f32)
+                .filter(|size| FONT_SIZES.contains(size))
+                .unwrap_or_else(default_font_size);
+            FONT_SIZE.store(size.to_bits(), Ordering::Relaxed);
+            size
+        }
+        bits => f32::from_bits(bits),
+    }
+}
+
+pub fn font_size() -> Pixels {
+    px(font_size_f32())
+}
+
+/// Change the text size of every terminal, and keep it for the next run.
+pub fn set_font_size(size: f32) {
+    let size = size.round().clamp(*FONT_SIZES.start(), *FONT_SIZES.end());
+    FONT_SIZE.store(size.to_bits(), Ordering::Relaxed);
+    if let Err(err) = crate::settings::set("font_size", json!(size)) {
+        log::warn!("saving the font size: {err:#}");
+    }
+}
+
+pub fn reset_font_size() {
+    FONT_SIZE.store(default_font_size().to_bits(), Ordering::Relaxed);
+    if let Err(err) = crate::settings::set("font_size", Value::Null) {
+        log::warn!("saving the font size: {err:#}");
+    }
 }
 
 impl Render for TerminalPane {
@@ -801,8 +1189,10 @@ impl Render for TerminalPane {
         };
         self.cell = Some(cell);
 
-        let focused = self.focus_handle.is_focused(window);
+        // Keyboard focus is in this pane, on the terminal or its search bar.
+        let focused = self.focus_handle.contains_focused(window, cx);
         let theme = self.theme();
+        let mut matches = (Vec::new(), None);
         {
             let term = self.term.clone();
             let mut shared = term.lock().unwrap();
@@ -821,8 +1211,45 @@ impl Render for TerminalPane {
             }
             // Copy what's on screen, then draw from the copy without the lock.
             self.render_state.update(&shared.term);
+            // Catch the search up with new output and where the view is scrolled to.
+            if let Some(bar) = &mut self.search {
+                let mirror::Shared {
+                    term,
+                    generation,
+                    search,
+                } = &mut *shared;
+                if let Some(search) = live_search(search, term, *generation, &bar.needle) {
+                    search.run(term);
+                    bar.total = search.total();
+                    bar.selected = search.selected_index();
+                    matches = search.visible_matches(term);
+                }
+            }
         }
-        let frame = Frame::capture(&self.render_state.frame(), &theme, focused);
+        let mut frame = Frame::capture(&self.render_state.frame(), &theme, focused);
+        let cols = self.render_state.rows().first().map_or(0, Vec::len);
+        let (found, selected) = matches;
+        for (span, color) in found
+            .iter()
+            .filter(|span| Some(**span) != selected)
+            .map(|span| (span, Hsla::from(gpui::rgb(MATCH)).opacity(0.35)))
+            .chain(
+                selected
+                    .iter()
+                    .map(|span| (span, Hsla::from(gpui::rgb(SELECTED_MATCH)).opacity(0.7))),
+            )
+        {
+            for (row, range) in span_rows(*span, cols) {
+                frame.highlights.push((row, range, color));
+            }
+        }
+        frame.link = self.hover_link.as_ref().map(|link| {
+            (
+                link.row,
+                link.cols.clone(),
+                Hsla::from(gpui::rgb(ui().accent)),
+            )
+        });
         let background = frame.background;
         let status = self.status();
         let entity = cx.entity();
@@ -831,12 +1258,30 @@ impl Render for TerminalPane {
             .pending_paste
             .as_ref()
             .map(|text| self.render_paste_prompt(text, cx));
+        let search_bar = self
+            .search
+            .as_ref()
+            .map(|bar| self.render_search_bar(bar, cx));
 
         div()
             .id(SharedString::from(self.block_id.clone()))
             .track_focus(&self.focus_handle)
             .key_context("Terminal")
             .on_key_down(cx.listener(Self::on_key_down))
+            .capture_key_down(cx.listener(Self::on_search_key))
+            .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
+            .on_action(cx.listener(Self::copy))
+            .on_action(cx.listener(Self::paste_clipboard))
+            .on_action(cx.listener(Self::find))
+            .on_action(
+                cx.listener(|this, _: &ScrollPageUp, window, cx| {
+                    this.scroll_page(true, window, cx)
+                }),
+            )
+            .on_action(cx.listener(|this, _: &ScrollPageDown, window, cx| {
+                this.scroll_page(false, window, cx)
+            }))
+            .when(self.hover_link.is_some(), |d| d.cursor_pointer())
             .on_scroll_wheel(cx.listener(Self::on_scroll))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_down(MouseButton::Middle, cx.listener(Self::on_mouse_down))
@@ -871,6 +1316,7 @@ impl Render for TerminalPane {
                 .size_full(),
             )
             .children(scrollbar)
+            .children(search_bar)
             .children(paste_prompt)
             .children(status.map(|status| {
                 div()
@@ -940,6 +1386,76 @@ impl TerminalPane {
                         }),
                 ),
         )
+    }
+
+    fn render_search_bar(
+        &self,
+        bar: &SearchBar,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let count = match (bar.needle.is_empty(), bar.total) {
+            (true, _) => String::new(),
+            (false, 0) => "No matches".into(),
+            (false, total) => format!("{} of {total}", bar.selected.map_or(0, |i| i + 1)),
+        };
+        let button = |id: &'static str, path: &'static str| {
+            div()
+                .id(id)
+                .size(px(26.))
+                .flex()
+                .flex_none()
+                .items_center()
+                .justify_center()
+                .rounded(px(7.))
+                .cursor_pointer()
+                .hover(|d| d.bg(gpui::rgb(ui().tab_active)))
+                .child(
+                    gpui::svg()
+                        .path(path)
+                        .size(px(15.))
+                        .text_color(gpui::rgb(ui().text_dim)),
+                )
+        };
+        div()
+            .absolute()
+            .top(px(8.))
+            .right(px(SCROLLBAR_WIDTH + 8.))
+            .w(px(360.))
+            .max_w(gpui::relative(0.9))
+            .p_1()
+            .flex()
+            .items_center()
+            .gap_1()
+            .rounded(px(10.))
+            .border_1()
+            .border_color(gpui::rgb(ui().tab_active_border))
+            .bg(gpui::rgb(ui().menu))
+            .shadow_lg()
+            .text_color(gpui::rgb(ui().text))
+            // Clicks on the bar aren't for the terminal under it.
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_move(|_, _, cx| cx.stop_propagation())
+            .child(div().flex_1().min_w(px(0.)).child(bar.field.clone()))
+            .child(
+                div()
+                    .flex_none()
+                    .px_1()
+                    .text_xs()
+                    .text_color(gpui::rgb(ui().text_dim))
+                    .child(count),
+            )
+            .child(
+                button("search-older", "icons/chevron-up.svg")
+                    .on_click(cx.listener(|this, _, _, cx| this.select_match(true, cx))),
+            )
+            .child(
+                button("search-newer", "icons/chevron-down.svg")
+                    .on_click(cx.listener(|this, _, _, cx| this.select_match(false, cx))),
+            )
+            .child(
+                button("search-close", "icons/close.svg")
+                    .on_click(cx.listener(|this, _, window, cx| this.close_search(window, cx))),
+            )
     }
 
     fn render_paste_prompt(&self, text: &str, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -1030,6 +1546,10 @@ struct Frame {
     segments: Vec<Segment>,
     backgrounds: Vec<(usize, Range<usize>, Hsla)>,
     cursor: Option<(usize, usize, CursorShape, Hsla, bool)>,
+    /// Search matches to color behind the text.
+    highlights: Vec<(usize, Range<usize>, Hsla)>,
+    /// A link to underline, under the pointer while Ctrl is held.
+    link: Option<(usize, Range<usize>, Hsla)>,
 }
 
 impl Frame {
@@ -1121,6 +1641,8 @@ impl Frame {
             segments,
             backgrounds,
             cursor,
+            highlights: Vec::new(),
+            link: None,
         }
     }
 
@@ -1144,6 +1666,19 @@ impl Frame {
         for (row, cols, color) in &self.backgrounds {
             let size = size(cell.width * cols.len() as f32, cell.height);
             window.paint_quad(fill(Bounds::new(at(*row, cols.start), size), *color));
+        }
+
+        for (row, cols, color) in &self.highlights {
+            let size = size(cell.width * cols.len() as f32, cell.height);
+            window.paint_quad(fill(Bounds::new(at(*row, cols.start), size), *color));
+        }
+        if let Some((row, cols, color)) = &self.link {
+            let start = at(*row, cols.start);
+            let line = Bounds::new(
+                point(start.x, start.y + cell.height - px(1.)),
+                size(cell.width * cols.len() as f32, px(1.)),
+            );
+            window.paint_quad(fill(line, *color));
         }
 
         if let Some((row, col, shape, color, focused)) = self.cursor {
@@ -1320,6 +1855,69 @@ mod tests {
         assert_eq!(info("/home/amit").short_cwd(), "/home/amit");
         assert_eq!(info("/tmp").short_cwd(), "/tmp");
     }
+    fn row(text: &str) -> Vec<ghostty::Cell> {
+        let mut term = ghostty::Terminal::new(80, 1).unwrap();
+        term.write(text.as_bytes());
+        let mut state = RenderState::new().unwrap();
+        state.update(&term);
+        state.frame().rows[0].clone()
+    }
+
+    #[test]
+    fn finds_urls_in_text() {
+        let text = "see (https://example.com/a_(b)?q=1). or mailto:me@x.org, done";
+        let cells = row(text);
+        let url = |col| url_in_row(&cells, col).map(|(_, url)| url);
+        let start = text.find("https").unwrap();
+        assert_eq!(url(start).as_deref(), Some("https://example.com/a_(b)?q=1"));
+        assert_eq!(
+            url(start + 10).as_deref(),
+            Some("https://example.com/a_(b)?q=1")
+        );
+        assert_eq!(url(start - 1), None);
+        assert_eq!(url(text.find(").").unwrap() + 1), None);
+        assert_eq!(
+            url(text.find("mailto").unwrap() + 3).as_deref(),
+            Some("mailto:me@x.org")
+        );
+        assert_eq!(url(0), None);
+        assert_eq!(
+            url_in_row(&cells, start).map(|(cols, _)| cols),
+            Some(start..start + "https://example.com/a_(b)?q=1".len())
+        );
+        // A scheme on its own, or inside a word, isn't a link.
+        assert_eq!(url_in_row(&row("xhttps://a.b https:// "), 3), None);
+        assert_eq!(url_in_row(&row("xhttps://a.b https:// "), 14), None);
+    }
+
+    #[test]
+    fn opens_only_web_and_mail_links() {
+        assert!(openable("https://example.com"));
+        assert!(openable("HTTP://example.com"));
+        assert!(openable("mailto:me@example.com"));
+        assert!(!openable("file:///etc/passwd"));
+        assert!(!openable("javascript:alert(1)"));
+        assert!(!openable("https://"));
+    }
+
+    #[test]
+    fn spans_cover_wrapped_rows() {
+        let p = |x, y| ViewportPoint { x, y };
+        let one_row = Span {
+            start: p(2, 1),
+            end: p(5, 1),
+        };
+        assert_eq!(span_rows(one_row, 10), vec![(1, 2..6)]);
+        let wrapped = Span {
+            start: p(7, 0),
+            end: p(1, 2),
+        };
+        assert_eq!(
+            span_rows(wrapped, 10),
+            vec![(0, 7..10), (1, 0..10), (2, 0..2)]
+        );
+    }
+
     use crate::rex::data::StreamSplitter;
 
     /// `cargo test --release -- --ignored --nocapture parse_throughput`
